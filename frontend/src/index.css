@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+:root {
+  /* Default: Light Theme */
+  --color-brand: #197fe6;
+  --color-brand-hover: #166bca;
+  --color-accent: #22d3ee;
+  
+  --color-bg-dark: #f8fafc;
+  --color-bg-surface: #ffffff;
+  --color-bg-elevated: #f1f5f9;
+  
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-muted: #64748b;
+  
+  --color-border-subtle: #e2e8f0;
+  --color-border-strong: #cbd5e1;
+}
+
+.dark {
+  /* Dark Theme */
+  --color-bg-dark: #111921;
+  --color-bg-surface: #1e293b;
+  --color-bg-elevated: #334155;
+  
+  --color-text-primary: #f8fafc;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+  
+  --color-border-subtle: #334155;
+  --color-border-strong: #475569;
+}
+
+body, input, select, textarea, button {
+  background-color: var(--color-bg-dark);
+  color: var(--color-text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar for matrix and panels */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-bg-surface);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
