@@ -21,7 +21,7 @@ import './index.css';
 const PRIVILEGES = ['READ', 'WRITE', 'EXECUTE', 'BILLING', 'NETWORK', 'INFRASTRUCTURE'];
 const DEFAULT_ROLES = ['Owner', 'Manager', 'Developer', 'Viewer'];
 const ICONS = { Folder, File, Database, Globe, Server };
-const API_BASE = 'http://localhost:5000/api';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
 
 const DEFAULT_MATRIX = {
     Owner: Object.fromEntries(PRIVILEGES.map(p => [p, true])),
