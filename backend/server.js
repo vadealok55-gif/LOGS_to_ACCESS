@@ -172,6 +172,10 @@ const logger = async (req, res, next) => {
             else if (req.method === 'PUT' && req.originalUrl.includes('/groups')) actionName = 'GROUP_UPDATED';
             else if (req.method === 'PUT' && req.originalUrl.includes('/members')) actionName = 'USER_ROLE_UPDATED';
             else if (req.method === 'POST' && req.originalUrl.includes('/impersonate')) actionName = 'ADMIN_IMPERSONATION';
+            else if (req.method === 'PUT' && req.originalUrl.includes('/approve')) actionName = 'JOIN_APPROVED';
+            else if (req.method === 'PUT' && req.originalUrl.includes('/deny')) actionName = 'JOIN_DENIED';
+
+            const orgId = req.body?.orgId || req.query?.orgId || req.params?.orgId || req.body?.orgName || null;
 
             const logEntry = {
                 uid: req.user ? req.user.uid : 'anonymous',
@@ -179,7 +183,8 @@ const logger = async (req, res, next) => {
                 action: actionName,
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
                 details: { ...req.body },
-                ip: req.ip || 'unknown'
+                ip: req.ip || 'unknown',
+                orgId: orgId
             };
             
             // Mask passwords in logs
@@ -279,11 +284,14 @@ app.get('/api/health', authenticate, async (req, res) => {
 app.get('/api/user/activity', authenticate, async (req, res) => {
     try {
         const uid = req.user.uid;
-        // Temporarily fetch without orderBy to avoid index requirement
-        // We will sort in-memory for the last 50 items
-        const snapshot = await db.collection('activity_logs')
-            .where('uid', '==', uid)
-            .get();
+        const { orgId } = req.query;
+
+        let query = db.collection('activity_logs').where('uid', '==', uid);
+        if (orgId) {
+            query = query.where('orgId', '==', orgId);
+        }
+
+        const snapshot = await query.get();
         
         const logs = snapshot.docs.map(doc => {
             const data = doc.data();
@@ -609,6 +617,40 @@ app.delete('/api/resources/:id', authenticate, async (req, res) => {
         await docRef.delete();
         res.json({ message: 'Deleted', source: 'firestore' });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get organization audit logs
+app.get('/api/organizations/:orgId/audit-logs', authenticate, async (req, res) => {
+    const { orgId } = req.params;
+    try {
+        // Verify caller is Admin or Owner of the org
+        const memberId = `${orgId}_${req.user.uid}`;
+        const memberDoc = await db.collection('org_members').doc(memberId).get();
+        if (!memberDoc.exists || !['Admin', 'Owner'].includes(memberDoc.data().role)) {
+            return res.status(403).json({ error: 'Admin access required.' });
+        }
+
+        const snapshot = await db.collection('activity_logs')
+            .where('orgId', '==', orgId)
+            .get();
+        
+        const logs = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                ...data,
+                timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
+                ipAddress: data.ip || 'unknown'
+            };
+        })
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .slice(0, 100);
+        
+        res.json({ logs });
+    } catch (err) {
+        console.error('Fetch org audit logs error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
