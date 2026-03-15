@@ -21,7 +21,7 @@ import './index.css';
 const PRIVILEGES = ['READ', 'WRITE', 'EXECUTE', 'BILLING', 'NETWORK', 'INFRASTRUCTURE'];
 const DEFAULT_ROLES = ['Owner', 'Manager', 'Developer', 'Viewer'];
 const ICONS = { Folder, File, Database, Globe, Server };
-const API_BASE = 'http://localhost:5000/api';
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
 
 const DEFAULT_MATRIX = {
     Owner: Object.fromEntries(PRIVILEGES.map(p => [p, true])),
@@ -363,6 +363,11 @@ export default function App() {
     };
 
     const handleLogout = async () => {
+        try {
+            await fetchWithAuth('/user/log-logout', firebaseUser, { method: 'POST' });
+        } catch (err) {
+            console.error('Failed to log logout:', err);
+        }
         await signOut(auth);
         setCurrentUser(null);
         setCurrentOrg(null);
@@ -523,9 +528,10 @@ export default function App() {
         try {
             await fetchWithAuth(`/org-members/${memberId}`, firebaseUser, {
                 method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ role, groupId })
             });
-            showToast('Member profile updated', 'success');
+            showToast('Member updated', 'success');
             fetchOrgMembers(currentOrg.id);
         } catch (err) {
             showToast(err.message, 'error');
@@ -1377,9 +1383,21 @@ export default function App() {
                                                         <td className="px-5 py-3.5"><span className="text-text-secondary text-xs">{m.groupName || '-'}</span></td>
                                                         <td className="px-5 py-3.5"><span className="text-text-secondary text-xs max-w-[180px] truncate block" title={m.workDetails || m.taskTitle || ''}>{m.taskTitle || m.workDetails || <span className="text-text-muted italic">-</span>}</span></td>
                                                         <td className="px-5 py-3.5">
-                                                            {m.taskStatus ? (
-                                                                <span className={`px-2 py-0.5 rounded text-xs font-medium ${m.taskStatus === 'done' ? 'bg-green-900/50 text-green-300' : m.taskStatus === 'in-progress' ? 'bg-yellow-900/50 text-yellow-300' : 'bg-bg-dark text-text-muted'}`}>{m.taskStatus}</span>
-                                                            ) : <span className="text-text-muted text-xs">-</span>}
+                                                            <div className="flex items-center gap-2">
+                                                                {m.taskStatus ? (
+                                                                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${m.taskStatus === 'done' ? 'bg-green-900/50 text-green-300' : m.taskStatus === 'in-progress' ? 'bg-yellow-900/50 text-yellow-300' : 'bg-bg-dark text-text-muted'}`}>{m.taskStatus}</span>
+                                                                ) : <span className="text-text-muted text-xs">-</span>}
+                                                                
+                                                                {m.uid === currentUser?.uid && m.taskStatus && m.taskStatus !== 'done' && (
+                                                                    <button 
+                                                                        onClick={() => handleCompleteTask(m.memberId)}
+                                                                        className="p-1 hover:bg-green-500/20 text-green-400 rounded transition-colors"
+                                                                        title="Mark as Done"
+                                                                    >
+                                                                        <Check size={14} />
+                                                                    </button>
+                                                                )}
+                                                            </div>
                                                         </td>
                                                         <td className="px-5 py-3.5 text-text-muted text-xs">{m.joinedAt ? new Date(m.joinedAt).toLocaleDateString() : '-'}</td>
                                                     </tr>
@@ -2065,17 +2083,19 @@ export default function App() {
                     </div>
 
                     <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
-                        {userActivity.filter(log => ['USER_LOGIN', 'ORG_CREATED', 'GROUP_CREATED', 'GROUP_UPDATED', 'RESOURCE_CREATED', 'RESOURCE_EDITED'].includes(log.action)).length === 0 ? (
+                        {userActivity.filter(log => ['USER_LOGIN', 'USER_LOGOUT', 'TASK_COMPLETED', 'ORG_CREATED', 'GROUP_CREATED', 'GROUP_UPDATED', 'RESOURCE_CREATED', 'RESOURCE_EDITED', 'ACCESS_DENIED'].includes(log.action)).length === 0 ? (
                             <div className="text-center py-8 text-text-muted">
                                 <History size={32} className="mx-auto mb-3 opacity-20" />
                                 <p className="text-sm">No recent activity found.</p>
                             </div>
                         ) : (
-                            userActivity.filter(log => ['USER_LOGIN', 'ORG_CREATED', 'GROUP_CREATED', 'GROUP_UPDATED', 'RESOURCE_CREATED', 'RESOURCE_EDITED'].includes(log.action)).map((log, idx) => (
+                            userActivity.filter(log => ['USER_LOGIN', 'USER_LOGOUT', 'TASK_COMPLETED', 'ORG_CREATED', 'GROUP_CREATED', 'GROUP_UPDATED', 'RESOURCE_CREATED', 'RESOURCE_EDITED', 'ACCESS_DENIED'].includes(log.action)).map((log, idx) => (
                                 <div key={idx} className="flex gap-4 p-4 rounded-xl border border-border-subtle hover:border-border-strong bg-bg-dark/50 transition-colors">
                                     <div className="mt-1">
                                         {/* Icon based on action */}
                                         {log.action === 'USER_LOGIN' && <LogIn size={16} className="text-brand" />}
+                                        {log.action === 'USER_LOGOUT' && <LogOut size={16} className="text-blue-400" />}
+                                        {log.action === 'TASK_COMPLETED' && <Check size={16} className="text-green-400" />}
                                         {(log.action === 'RESOURCE_CREATED' || log.action === 'Created') && <FileText size={16} className="text-green-400" />}
                                         {(log.action === 'RESOURCE_EDITED' || log.action === 'Edited') && <Edit2 size={16} className="text-yellow-400" />}
                                         {log.action === 'USER_ROLE_UPDATED' && <Shield size={16} className="text-red-400" />}
@@ -2083,12 +2103,13 @@ export default function App() {
                                         {log.action === 'ORG_CREATED' && <Building size={16} className="text-blue-400" />}
                                         {log.action === 'GROUP_CREATED' && <Users size={16} className="text-purple-400" />}
                                         {log.action === 'ADMIN_IMPERSONATION' && <Zap size={16} className="text-yellow-500" />}
+                                        {log.action === 'ACCESS_DENIED' && <AlertCircle size={16} className="text-red-400" />}
                                         {/* default */}
-                                        {(!['USER_LOGIN', 'ORG_CREATED', 'GROUP_CREATED', 'RESOURCE_CREATED', 'Created', 'RESOURCE_EDITED', 'Edited', 'USER_ROLE_UPDATED', 'GROUP_JOINED', 'ADMIN_IMPERSONATION'].includes(log.action)) && <History size={16} className="text-text-muted" />}
+                                        {(!['USER_LOGIN', 'ORG_CREATED', 'GROUP_CREATED', 'RESOURCE_CREATED', 'Created', 'RESOURCE_EDITED', 'Edited', 'USER_ROLE_UPDATED', 'GROUP_JOINED', 'ADMIN_IMPERSONATION', 'ACCESS_DENIED'].includes(log.action)) && <History size={16} className="text-text-muted" />}
                                     </div>
                                     <div className="flex-1 min-w-0">
                                         <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-1 sm:gap-4">
-                                            <p className="text-sm font-bold text-text-primary uppercase tracking-wide truncate">
+                                            <p className={`text-sm font-bold uppercase tracking-wide truncate ${log.action === 'ACCESS_DENIED' ? 'text-red-400' : 'text-text-primary'}`}>
                                                 {log.action.replace(/_/g, ' ')}
                                             </p>
                                             <p className="text-[10px] text-text-muted font-mono whitespace-nowrap shrink-0">
@@ -2235,11 +2256,15 @@ export default function App() {
                                                 {log.timestamp ? new Date(log.timestamp).toLocaleString() : 'N/A'}
                                             </td>
                                             <td className="p-4">
-                                                <p className="font-semibold text-text-primary">{log.email}</p>
-                                                {log.uid && <p className="text-[10px] text-text-muted font-mono">{log.uid.slice(0, 8)}...</p>}
+                                                <p className="font-semibold text-text-primary">{log.userName || log.email}</p>
+                                                {log.userName && <p className="text-[10px] text-text-muted font-mono">{log.email}</p>}
+                                                {log.uid && !log.userName && <p className="text-[10px] text-text-muted font-mono">{log.uid.slice(0, 8)}...</p>}
                                             </td>
                                             <td className="p-4">
-                                                <span className="inline-block bg-brand/10 text-brand border border-brand/20 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider">
+                                                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                                    log.action === 'ACCESS_DENIED' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-brand/10 text-brand border border-brand/20'
+                                                }`}>
+                                                    {log.action === 'ACCESS_DENIED' && <AlertCircle size={10} />}
                                                     {log.action.replace(/_/g, ' ')}
                                                 </span>
                                             </td>
