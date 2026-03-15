@@ -66,21 +66,59 @@ try {
     if (fs.existsSync(serviceAccountPath)) {
         admin.initializeApp({
             credential: admin.credential.cert(require(path.resolve(serviceAccountPath))),
-            projectId: 'nexusguard-hub'
+            projectId: process.env.FIREBASE_PROJECT_ID || 'nexusguard-hub'
         });
         console.log('✅ Firebase Admin initialized with service account.');
     } else {
         console.warn('⚠️  serviceAccountKey.json not found. Backend will run in LIMITED MODE (RBAC & Firestore will fail).');
         console.warn('👉 Place your Firebase Service Account JSON at: ' + path.resolve(serviceAccountPath));
         admin.initializeApp({
-            projectId: 'nexusguard-hub'
+            projectId: process.env.FIREBASE_PROJECT_ID || 'nexusguard-hub'
         });
+
     }
 } catch (err) {
     console.error('❌ Firebase Admin Init Error:', err.message);
 }
 
 const db = admin.firestore();
+const logActivity = async (req, action, details = {}, orgId = null) => {
+    try {
+        // Mask passwords and codes in a local copy
+        const maskedDetails = { ...details };
+        if (maskedDetails.password) maskedDetails.password = '********';
+        if (maskedDetails.code) maskedDetails.code = '******';
+        if (maskedDetails.verificationCode) maskedDetails.verificationCode = '******';
+
+        // Robustly get orgId from various sources
+        const effectiveOrgId = orgId || 
+                              req.query?.orgId || 
+                              req.body?.orgId || 
+                              req.params?.orgId || 
+                              req.userData?.orgId || null;
+
+        const logEntry = {
+            uid: req.user ? req.user.uid : 'anonymous',
+            email: req.user ? req.user.email : 'anonymous',
+            userName: req.userData ? (req.userData.firstName ? `${req.userData.firstName} ${req.userData.lastName || ''}`.trim() : (req.userData.displayName || req.userData.userName || req.userData.email)) : (req.user ? req.user.email : 'anonymous'),
+            action,
+            timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            details: maskedDetails,
+            ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || 'unknown',
+            orgId: effectiveOrgId
+        };
+        
+        // Final fallback for userName
+        if ((!logEntry.userName || logEntry.userName === 'anonymous') && req.user?.email) {
+            logEntry.userName = req.user.email;
+        }
+
+        await db.collection('activity_logs').add(logEntry);
+    } catch (err) {
+        console.error(`[LOGGING_ERROR] Action: ${action}, Error:`, err.message);
+    }
+};
+
 
 
 
@@ -161,38 +199,27 @@ const authenticate = async (req, res, next) => {
 // Middleware to log all non-GET actions for auditing
 const logger = async (req, res, next) => {
     if (req.method !== 'GET') {
-        try {
-            let actionName = `${req.method} ${req.originalUrl}`;
-            
-            // Map to friendly names for UI
-            if (req.method === 'POST' && req.originalUrl.includes('/resources')) actionName = 'RESOURCE_CREATED';
-            else if (req.method === 'PUT' && req.originalUrl.includes('/resources')) actionName = 'RESOURCE_EDITED';
-            else if (req.method === 'POST' && req.originalUrl.includes('/organizations')) actionName = 'ORG_CREATED';
-            else if (req.method === 'POST' && req.originalUrl.includes('/groups')) actionName = 'GROUP_CREATED';
-            else if (req.method === 'PUT' && req.originalUrl.includes('/groups')) actionName = 'GROUP_UPDATED';
-            else if (req.method === 'PUT' && req.originalUrl.includes('/members')) actionName = 'USER_ROLE_UPDATED';
-            else if (req.method === 'POST' && req.originalUrl.includes('/impersonate')) actionName = 'ADMIN_IMPERSONATION';
+        let actionName = `${req.method} ${req.originalUrl}`;
+        
+        // Map to friendly names for UI
+        if (req.method === 'POST' && req.originalUrl.includes('/resources')) actionName = 'RESOURCE_CREATED';
+        else if (req.method === 'PUT' && req.originalUrl.includes('/resources')) actionName = 'RESOURCE_EDITED';
+        else if (req.method === 'POST' && req.originalUrl.includes('/organizations')) actionName = 'ORG_CREATED';
+        else if (req.method === 'POST' && req.originalUrl.includes('/groups')) actionName = 'GROUP_CREATED';
+        else if (req.method === 'PUT' && req.originalUrl.includes('/groups')) actionName = 'GROUP_UPDATED';
+        else if (req.method === 'PUT' && req.originalUrl.includes('/members')) actionName = 'USER_ROLE_UPDATED';
+        else if (req.method === 'POST' && req.originalUrl.includes('/impersonate')) actionName = 'ADMIN_IMPERSONATION';
+        else if (req.method === 'PUT' && req.originalUrl.includes('/approve')) actionName = 'JOIN_APPROVED';
+        else if (req.method === 'PUT' && req.originalUrl.includes('/deny')) actionName = 'JOIN_DENIED';
 
-            const logEntry = {
-                uid: req.user ? req.user.uid : 'anonymous',
-                email: req.user ? req.user.email : 'anonymous',
-                action: actionName,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                details: { ...req.body },
-                ip: req.ip || 'unknown'
-            };
-            
-            // Mask passwords in logs
-            if (logEntry.details.password) logEntry.details.password = '********';
-
-            await db.collection('activity_logs').add(logEntry);
-        } catch (err) {
-            console.error('Logging error:', err.message);
-        }
+        // Note: req.user/req.userData might not be populated if logger runs before authenticate.
+        // We will call logActivity, which handles anonymous cases.
+        logActivity(req, actionName, req.body);
     }
     next();
 };
 
+app.use('/api', authenticate);
 app.use(logger);
 
 // RBAC: Check if System Admin
@@ -200,6 +227,7 @@ const isSystemAdmin = (req, res, next) => {
     if (req.userData && req.userData.isSystemAdmin) {
         next();
     } else {
+        logActivity(req, 'ACCESS_DENIED', { reason: 'System Administrator privilege required', url: req.originalUrl });
         res.status(403).json({ error: 'Access denied. System Administrator only.' });
     }
 };
@@ -219,6 +247,7 @@ const hasOrgRole = (roles) => {
             if (memberDoc.exists && roles.includes(memberDoc.data().role)) {
                 next();
             } else {
+                logActivity(req, 'ACCESS_DENIED', { reason: `Required roles: ${roles.join(', ')}`, orgId });
                 res.status(403).json({ error: `Access denied. Requires one of roles: ${roles.join(', ')}` });
             }
         } catch (err) {
@@ -239,7 +268,10 @@ const hasPrivilege = (privilege) => {
             const memberId = `${orgId}_${req.user.uid}`;
             const memberDoc = await db.collection('org_members').doc(memberId).get();
 
-            if (!memberDoc.exists) return res.status(403).json({ error: 'Access denied.' });
+            if (!memberDoc.exists) {
+                logActivity(req, 'ACCESS_DENIED', { reason: 'Not an org member', orgId });
+                return res.status(403).json({ error: 'Access denied.' });
+            }
 
             const data = memberDoc.data();
             
@@ -254,6 +286,7 @@ const hasPrivilege = (privilege) => {
                 }
             }
             
+            logActivity(req, 'ACCESS_DENIED', { reason: `Requires ${privilege} privilege`, orgId });
             res.status(403).json({ error: `Access denied. Requires ${privilege} privilege.` });
         } catch (err) {
             console.error('HAS PRIVILEGE ERROR TRAP:', err.message, err.stack);
@@ -279,11 +312,14 @@ app.get('/api/health', authenticate, async (req, res) => {
 app.get('/api/user/activity', authenticate, async (req, res) => {
     try {
         const uid = req.user.uid;
-        // Temporarily fetch without orderBy to avoid index requirement
-        // We will sort in-memory for the last 50 items
-        const snapshot = await db.collection('activity_logs')
-            .where('uid', '==', uid)
-            .get();
+        const { orgId } = req.query;
+
+        let query = db.collection('activity_logs').where('uid', '==', uid);
+        if (orgId) {
+            query = query.where('orgId', '==', orgId);
+        }
+
+        const snapshot = await query.get();
         
         const logs = snapshot.docs.map(doc => {
             const data = doc.data();
@@ -308,20 +344,21 @@ app.get('/api/user/activity', authenticate, async (req, res) => {
 // Explicit endpoint to log login
 app.post('/api/user/log-login', authenticate, async (req, res) => {
     try {
-        const uid = req.user.uid;
-        const email = req.user.email;
-        const logEntry = {
-            uid: uid,
-            email: email,
-            action: 'USER_LOGIN',
-            timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            details: {},
-            ip: req.ip || 'unknown'
-        };
-        await db.collection('activity_logs').add(logEntry);
+        await logActivity(req, 'USER_LOGIN');
         res.json({ success: true });
     } catch (err) {
         console.error('Log login error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Explicit endpoint to log logout
+app.post('/api/user/log-logout', authenticate, async (req, res) => {
+    try {
+        await logActivity(req, 'USER_LOGOUT');
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Log logout error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -542,7 +579,10 @@ app.put('/api/resources/:id', authenticate, async (req, res) => {
             }
         }
 
-        if (!canEdit) return res.status(403).json({ error: 'Access denied. Setup custom groups or verify WRITE permissions.' });
+        if (!canEdit) {
+            logActivity(req, 'ACCESS_DENIED', { reason: 'Resource write permission denied', resourceId: req.params.id, orgId });
+            return res.status(403).json({ error: 'Access denied. Setup custom groups or verify WRITE permissions.' });
+        }
 
         const updates = {};
         if (req.body.allowedGroups !== undefined) updates.allowedGroups = req.body.allowedGroups;
@@ -604,11 +644,48 @@ app.delete('/api/resources/:id', authenticate, async (req, res) => {
             }
         }
 
-        if (!canEdit) return res.status(403).json({ error: 'Access denied. You do not have permission to delete this resource.' });
+        if (!canEdit) {
+            logActivity(req, 'ACCESS_DENIED', { reason: 'Resource delete permission denied', resourceId: req.params.id, orgId });
+            return res.status(403).json({ error: 'Access denied. You do not have permission to delete this resource.' });
+        }
 
         await docRef.delete();
         res.json({ message: 'Deleted', source: 'firestore' });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Get organization audit logs
+app.get('/api/organizations/:orgId/audit-logs', authenticate, async (req, res) => {
+    const { orgId } = req.params;
+    try {
+        // Verify caller is Admin or Owner of the org
+        const memberId = `${orgId}_${req.user.uid}`;
+        const memberDoc = await db.collection('org_members').doc(memberId).get();
+        if (!memberDoc.exists || !['Admin', 'Owner'].includes(memberDoc.data().role)) {
+            return res.status(403).json({ error: 'Admin access required.' });
+        }
+
+        const snapshot = await db.collection('activity_logs')
+            .where('orgId', '==', orgId)
+            .get();
+        
+        const logs = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                ...data,
+                timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : data.timestamp,
+                ipAddress: data.ip || 'unknown'
+            };
+        })
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .slice(0, 100);
+        
+        res.json({ logs });
+    } catch (err) {
+        console.error('Fetch org audit logs error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -884,6 +961,54 @@ app.put('/api/org-members/:memberId', authenticate, async (req, res) => {
         await memberRef.update(updates);
         res.json({ message: 'Member updated successfully.' });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Mark a task as complete
+app.put('/api/org-members/:memberId/complete-task', authenticate, async (req, res) => {
+    try {
+        const memberRef = db.collection('org_members').doc(req.params.memberId);
+        const memberDoc = await memberRef.get();
+        if (!memberDoc.exists) return res.status(404).json({ error: 'Member not found.' });
+        
+        const memberData = memberDoc.data();
+        const orgId = memberData.orgId;
+        
+        // Security check: Either you are completing your own task, or you are an admin/owner
+        const isSelf = memberData.uid === req.user.uid;
+        let canUpdate = isSelf;
+        
+        if (!canUpdate) {
+            const callerMemberId = `${orgId}_${req.user.uid}`;
+            const callerDoc = await db.collection('org_members').doc(callerMemberId).get();
+            if (callerDoc.exists && ['Admin', 'Owner'].includes(callerDoc.data().role)) {
+                canUpdate = true;
+            }
+        }
+
+        if (!canUpdate) {
+            await logActivity(req, 'ACCESS_DENIED', { 
+                targetMemberId: req.params.memberId, 
+                reason: 'Unauthorized task completion attempt' 
+            }, orgId);
+            return res.status(403).json({ error: 'Unauthorized. You can only complete your own tasks unless you are an admin.' });
+        }
+
+        await memberRef.update({
+            taskStatus: 'done',
+            taskCompletedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
+        await logActivity(req, 'TASK_COMPLETED', {
+            memberId: req.params.memberId,
+            taskTitle: memberData.taskTitle || 'Assigned Task',
+            userName: memberData.userName || memberData.email
+        }, orgId);
+
+        res.json({ success: true, message: 'Task marked as done.' });
+    } catch (err) {
+        console.error('Complete task error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });

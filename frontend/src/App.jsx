@@ -116,6 +116,7 @@ export default function App() {
     const [isVerifying, setIsVerifying] = useState(false);
     const [resendCooldown, setResendCooldown] = useState(0); // seconds remaining before resend allowed
     const [userActivity, setUserActivity] = useState([]);
+    const [auditLogs, setAuditLogs] = useState([]);
 
     // Theme Management
     const [theme, setTheme] = useState(localStorage.getItem('nexusguard_theme') || 'dark');
@@ -280,7 +281,8 @@ export default function App() {
     const fetchUserActivity = async () => {
         if (!firebaseUser) return;
         try {
-            const data = await fetchWithAuth('/user/activity', firebaseUser);
+            const endpoint = currentOrg ? `/user/activity?orgId=${currentOrg.id}` : '/user/activity';
+            const data = await fetchWithAuth(endpoint, firebaseUser);
             if (data && data.logs) setUserActivity(data.logs);
         } catch (err) {
             console.error('Activity fetch error:', err);
@@ -361,6 +363,11 @@ export default function App() {
     };
 
     const handleLogout = async () => {
+        try {
+            await fetchWithAuth('/user/log-logout', firebaseUser, { method: 'POST' });
+        } catch (err) {
+            console.error('Failed to log logout:', err);
+        }
         await signOut(auth);
         setCurrentUser(null);
         setCurrentOrg(null);
@@ -447,6 +454,16 @@ export default function App() {
         }
     };
 
+    const fetchAuditLogs = async (orgId) => {
+        if (!firebaseUser || !orgId) return;
+        try {
+            const data = await fetchWithAuth(`/organizations/${orgId}/audit-logs`, firebaseUser);
+            setAuditLogs(data.logs || []);
+        } catch (err) {
+            console.error('Fetch audit logs error:', err);
+        }
+    };
+
     const handleApproveRequest = async (requestId, assignedRole) => {
         try {
             await fetchWithAuth(`/join-requests/${requestId}/approve`, firebaseUser, { 
@@ -511,9 +528,10 @@ export default function App() {
         try {
             await fetchWithAuth(`/org-members/${memberId}`, firebaseUser, {
                 method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ role, groupId })
             });
-            showToast('Member profile updated', 'success');
+            showToast('Member updated', 'success');
             fetchOrgMembers(currentOrg.id);
         } catch (err) {
             showToast(err.message, 'error');
@@ -662,9 +680,64 @@ export default function App() {
         if (e.key !== 'Enter') return;
         const cmd = termInput.trim();
         const newOut = [...termOutput, { type: 'input', text: `> ${cmd}` }];
-        switch (cmd.toLowerCase()) {
+        const cmdLower = cmd.toLowerCase();
+
+        if (cmdLower.startsWith('create provision ')) {
+            const name = cmd.substring('create provision '.length).trim();
+            if (name) {
+                // Remove any wrapping quotes if someone typed create provision "name"
+                const cleanName = name.replace(/^["'](.+(?=["']$))["']$/, '$1');
+                handleCreateResource({ name: cleanName, type: 'Document', status: 'Active', version: '1.0' });
+                newOut.push({ type: 'success', text: `Provisioning resource: ${cleanName}...` });
+            } else {
+                newOut.push({ type: 'error', text: 'Usage: create provision <name>' });
+            }
+            setTermOutput(newOut);
+            setTermInput('');
+            return;
+        }
+
+        if (cmdLower.startsWith('edit provision ')) {
+            const parts = cmd.substring('edit provision '.length).split(' to ');
+            if (parts.length === 2) {
+                const oldName = parts[0].trim().replace(/^["'](.+(?=["']$))["']$/, '$1');
+                const newName = parts[1].trim().replace(/^["'](.+(?=["']$))["']$/, '$1');
+                const res = resources.find(r => r.name.toLowerCase() === oldName.toLowerCase());
+                if (res) {
+                    handleUpdateResource(res.id, { name: newName });
+                    newOut.push({ type: 'success', text: `Updating provision: ${oldName} -> ${newName}...` });
+                } else {
+                    newOut.push({ type: 'error', text: `Resource not found: ${oldName}` });
+                }
+            } else {
+                newOut.push({ type: 'error', text: 'Usage: edit provision <old_name> to <new_name>' });
+            }
+            setTermOutput(newOut);
+            setTermInput('');
+            return;
+        }
+
+        if (cmdLower.startsWith('delete provision ')) {
+            const name = cmd.substring('delete provision '.length).trim().replace(/^["'](.+(?=["']$))["']$/, '$1');
+            if (name) {
+                const res = resources.find(r => r.name.toLowerCase() === name.toLowerCase());
+                if (res) {
+                    handleDeleteResource(res.id);
+                    newOut.push({ type: 'success', text: `Decommissioning resource: ${name}...` });
+                } else {
+                    newOut.push({ type: 'error', text: `Resource not found: ${name}` });
+                }
+            } else {
+                newOut.push({ type: 'error', text: 'Usage: delete provision <name>' });
+            }
+            setTermOutput(newOut);
+            setTermInput('');
+            return;
+        }
+
+        switch (cmdLower) {
             case 'help':
-                newOut.push({ type: 'output', text: 'Commands: help, clear, whoami, policy --sync, node --status, resources --list' });
+                newOut.push({ type: 'output', text: 'Commands: help, clear, whoami, policy --sync, node --status, resources --list, create provision <name>, edit provision <old_name> to <new_name>, delete provision <name>' });
                 break;
             case 'clear':
                 setTermOutput([]);
@@ -1310,9 +1383,21 @@ export default function App() {
                                                         <td className="px-5 py-3.5"><span className="text-text-secondary text-xs">{m.groupName || '-'}</span></td>
                                                         <td className="px-5 py-3.5"><span className="text-text-secondary text-xs max-w-[180px] truncate block" title={m.workDetails || m.taskTitle || ''}>{m.taskTitle || m.workDetails || <span className="text-text-muted italic">-</span>}</span></td>
                                                         <td className="px-5 py-3.5">
-                                                            {m.taskStatus ? (
-                                                                <span className={`px-2 py-0.5 rounded text-xs font-medium ${m.taskStatus === 'done' ? 'bg-green-900/50 text-green-300' : m.taskStatus === 'in-progress' ? 'bg-yellow-900/50 text-yellow-300' : 'bg-bg-dark text-text-muted'}`}>{m.taskStatus}</span>
-                                                            ) : <span className="text-text-muted text-xs">-</span>}
+                                                            <div className="flex items-center gap-2">
+                                                                {m.taskStatus ? (
+                                                                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${m.taskStatus === 'done' ? 'bg-green-900/50 text-green-300' : m.taskStatus === 'in-progress' ? 'bg-yellow-900/50 text-yellow-300' : 'bg-bg-dark text-text-muted'}`}>{m.taskStatus}</span>
+                                                                ) : <span className="text-text-muted text-xs">-</span>}
+                                                                
+                                                                {m.uid === currentUser?.uid && m.taskStatus && m.taskStatus !== 'done' && (
+                                                                    <button 
+                                                                        onClick={() => handleCompleteTask(m.memberId)}
+                                                                        className="p-1 hover:bg-green-500/20 text-green-400 rounded transition-colors"
+                                                                        title="Mark as Done"
+                                                                    >
+                                                                        <Check size={14} />
+                                                                    </button>
+                                                                )}
+                                                            </div>
                                                         </td>
                                                         <td className="px-5 py-3.5 text-text-muted text-xs">{m.joinedAt ? new Date(m.joinedAt).toLocaleDateString() : '-'}</td>
                                                     </tr>
@@ -1695,13 +1780,6 @@ export default function App() {
     };
 
     const renderTerminal = () => {
-        if (!hasPrivilege('EXECUTE') && currentUser?.role !== 'Owner') return (
-            <div className="flex flex-col items-center justify-center p-12 text-center text-text-muted">
-                <Terminal size={48} className="mb-4 opacity-50" />
-                <h3 className="text-xl font-medium mb-2">Terminal Locked</h3>
-                <p>EXECUTE privilege required for Sovereign Terminal access.</p>
-            </div>
-        );
         return (
             <div className="h-[600px] flex flex-col bg-[#0d1117] border border-border-strong rounded-lg overflow-hidden font-mono text-sm shadow-inner">
                 <div className="flex items-center gap-2 px-4 py-2 bg-bg-surface border-b border-border-strong">
@@ -2005,17 +2083,19 @@ export default function App() {
                     </div>
 
                     <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
-                        {userActivity.length === 0 ? (
+                        {userActivity.filter(log => ['USER_LOGIN', 'USER_LOGOUT', 'TASK_COMPLETED', 'ORG_CREATED', 'GROUP_CREATED', 'GROUP_UPDATED', 'RESOURCE_CREATED', 'RESOURCE_EDITED', 'ACCESS_DENIED'].includes(log.action)).length === 0 ? (
                             <div className="text-center py-8 text-text-muted">
                                 <History size={32} className="mx-auto mb-3 opacity-20" />
                                 <p className="text-sm">No recent activity found.</p>
                             </div>
                         ) : (
-                            userActivity.map((log, idx) => (
+                            userActivity.filter(log => ['USER_LOGIN', 'USER_LOGOUT', 'TASK_COMPLETED', 'ORG_CREATED', 'GROUP_CREATED', 'GROUP_UPDATED', 'RESOURCE_CREATED', 'RESOURCE_EDITED', 'ACCESS_DENIED'].includes(log.action)).map((log, idx) => (
                                 <div key={idx} className="flex gap-4 p-4 rounded-xl border border-border-subtle hover:border-border-strong bg-bg-dark/50 transition-colors">
                                     <div className="mt-1">
                                         {/* Icon based on action */}
                                         {log.action === 'USER_LOGIN' && <LogIn size={16} className="text-brand" />}
+                                        {log.action === 'USER_LOGOUT' && <LogOut size={16} className="text-blue-400" />}
+                                        {log.action === 'TASK_COMPLETED' && <Check size={16} className="text-green-400" />}
                                         {(log.action === 'RESOURCE_CREATED' || log.action === 'Created') && <FileText size={16} className="text-green-400" />}
                                         {(log.action === 'RESOURCE_EDITED' || log.action === 'Edited') && <Edit2 size={16} className="text-yellow-400" />}
                                         {log.action === 'USER_ROLE_UPDATED' && <Shield size={16} className="text-red-400" />}
@@ -2023,12 +2103,13 @@ export default function App() {
                                         {log.action === 'ORG_CREATED' && <Building size={16} className="text-blue-400" />}
                                         {log.action === 'GROUP_CREATED' && <Users size={16} className="text-purple-400" />}
                                         {log.action === 'ADMIN_IMPERSONATION' && <Zap size={16} className="text-yellow-500" />}
+                                        {log.action === 'ACCESS_DENIED' && <AlertCircle size={16} className="text-red-400" />}
                                         {/* default */}
-                                        {(!['USER_LOGIN', 'ORG_CREATED', 'GROUP_CREATED', 'RESOURCE_CREATED', 'Created', 'RESOURCE_EDITED', 'Edited', 'USER_ROLE_UPDATED', 'GROUP_JOINED', 'ADMIN_IMPERSONATION'].includes(log.action)) && <History size={16} className="text-text-muted" />}
+                                        {(!['USER_LOGIN', 'ORG_CREATED', 'GROUP_CREATED', 'RESOURCE_CREATED', 'Created', 'RESOURCE_EDITED', 'Edited', 'USER_ROLE_UPDATED', 'GROUP_JOINED', 'ADMIN_IMPERSONATION', 'ACCESS_DENIED'].includes(log.action)) && <History size={16} className="text-text-muted" />}
                                     </div>
                                     <div className="flex-1 min-w-0">
                                         <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-1 sm:gap-4">
-                                            <p className="text-sm font-bold text-text-primary uppercase tracking-wide truncate">
+                                            <p className={`text-sm font-bold uppercase tracking-wide truncate ${log.action === 'ACCESS_DENIED' ? 'text-red-400' : 'text-text-primary'}`}>
                                                 {log.action.replace(/_/g, ' ')}
                                             </p>
                                             <p className="text-[10px] text-text-muted font-mono whitespace-nowrap shrink-0">
@@ -2092,7 +2173,7 @@ export default function App() {
                                         </span>
                                     )}
                                 </div>
-                                {['Owner', 'Admin'].includes(currentUser?.role) && currentUser.uid !== member.uid && (
+                                {['Owner', 'Admin'].includes(currentOrg?.role) && currentUser.uid !== member.uid && (
                                     <div className="flex items-center gap-2 mt-2 md:mt-0 opacity-100 md:opacity-0 group-hover:opacity-100 transition-opacity">
                                         {currentUser?.isSystemAdmin && !impersonatedUid && member.uid !== currentUser.uid && (
                                             <button 
@@ -2136,6 +2217,83 @@ export default function App() {
         );
     };
 
+    const renderAuditLogs = () => {
+        return (
+            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-border-strong pb-4">
+                    <div>
+                        <h2 className="text-2xl font-black text-text-primary flex items-center gap-3">
+                            <FileText className="text-brand" /> Organization Audit Logs
+                        </h2>
+                        <p className="text-text-muted text-sm mt-1">Review centralized organization-wide activity and security events.</p>
+                    </div>
+                    <button onClick={() => fetchAuditLogs(currentOrg?.id)} className="bg-bg-elevated hover:bg-bg-surface border border-border-strong text-text-primary text-sm font-medium px-4 py-2 rounded-lg transition-colors flex items-center gap-2">
+                        <RefreshCw size={16} /> Refresh Logs
+                    </button>
+                </div>
+                
+                <div className="bg-bg-surface border border-border-subtle rounded-xl overflow-hidden shadow-sm">
+                    {auditLogs.length === 0 ? (
+                        <div className="text-center py-12">
+                            <FileText size={48} className="mx-auto text-text-muted opacity-20 mb-4" />
+                            <p className="text-text-muted">No audit logs available for this organization.</p>
+                        </div>
+                    ) : (
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left border-collapse">
+                                <thead>
+                                    <tr className="bg-bg-dark border-b border-border-strong text-[10px] uppercase tracking-wider font-bold text-text-muted">
+                                        <th className="p-4 rounded-tl-xl whitespace-nowrap">Timestamp</th>
+                                        <th className="p-4 whitespace-nowrap">Actor</th>
+                                        <th className="p-4 whitespace-nowrap">Action Type</th>
+                                        <th className="p-4 rounded-tr-xl">Event Details</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border-subtle bg-bg-surface">
+                                    {auditLogs.map((log) => (
+                                        <tr key={log.id} className="hover:bg-bg-dark/50 transition-colors text-sm group">
+                                            <td className="p-4 whitespace-nowrap text-text-muted text-xs font-mono">
+                                                {log.timestamp ? new Date(log.timestamp).toLocaleString() : 'N/A'}
+                                            </td>
+                                            <td className="p-4">
+                                                <p className="font-semibold text-text-primary">{log.userName || log.email}</p>
+                                                {log.userName && <p className="text-[10px] text-text-muted font-mono">{log.email}</p>}
+                                                {log.uid && !log.userName && <p className="text-[10px] text-text-muted font-mono">{log.uid.slice(0, 8)}...</p>}
+                                            </td>
+                                            <td className="p-4">
+                                                <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                                                    log.action === 'ACCESS_DENIED' ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-brand/10 text-brand border border-brand/20'
+                                                }`}>
+                                                    {log.action === 'ACCESS_DENIED' && <AlertCircle size={10} />}
+                                                    {log.action.replace(/_/g, ' ')}
+                                                </span>
+                                            </td>
+                                            <td className="p-4">
+                                                {log.details && Object.keys(log.details).filter(k => !['password', 'code', 'orgId'].includes(k)).length > 0 ? (
+                                                    <div className="text-xs text-text-secondary max-w-sm xl:max-w-md truncate">
+                                                        {Object.entries(log.details)
+                                                            .filter(([k]) => !['password', 'code', 'orgId'].includes(k))
+                                                            .map(([k, v]) => (
+                                                                <span key={k} className="mr-3 inline-block">
+                                                                    <span className="text-text-muted font-medium">{k}:</span> {typeof v === 'object' ? JSON.stringify(v) : v}
+                                                                </span>
+                                                            ))}
+                                                    </div>
+                                                ) : (
+                                                    <span className="text-text-muted italic text-xs">No details</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
     const renderGroups = () => {
         return (
             <div className="space-y-6">
@@ -2143,7 +2301,7 @@ export default function App() {
                     <h3 className="text-xl font-bold text-text-primary flex items-center gap-2">
                         <Shield className="text-accent" /> Custom Privilege Groups
                     </h3>
-                    {['Admin', 'Owner'].includes(currentUser?.role) && (
+                    {['Admin', 'Owner'].includes(currentOrg?.role) && (
                         <button onClick={() => setIsCreating(true)} className="bg-accent hover:bg-accent/80 text-white text-sm font-medium px-4 py-1.5 rounded-md flex items-center gap-2 transition-colors">
                             <Plus size={16} /> New Group
                         </button>
@@ -2209,7 +2367,7 @@ export default function App() {
                                 </div>
                             </div>
                             
-                            {['Owner', 'Admin'].includes(currentUser?.role) && (
+                            {['Owner', 'Admin'].includes(currentOrg?.role) && (
                                 <div className="mt-4 pt-3 border-t border-border-subtle opacity-0 group-hover/card:opacity-100 transition-opacity flex justify-between items-center">
                                     <p className="text-[10px] text-text-muted text-center">To edit, delete & recreate.</p>
                                     <button onClick={(e) => { e.stopPropagation(); setAssigningGroup(group); }} className="text-xs text-brand hover:text-brand-hover hover:underline transition-colors flex items-center gap-1">
@@ -2446,8 +2604,8 @@ export default function App() {
                         <div className="min-w-0">
                             <p className="text-sm font-bold text-text-primary truncate">{currentUser?.name}</p>
                             <p className="text-[10px] text-text-muted flex items-center gap-1 font-semibold uppercase tracking-tighter">
-                                {currentUser?.role === 'Owner' && <Shield size={10} className="text-brand" />}
-                                {currentUser?.role}
+                                {currentOrg?.role === 'Owner' && <Shield size={10} className="text-brand" />}
+                                {currentOrg?.role || 'Member'}
                             </p>
                         </div>
                     </div>
@@ -2501,19 +2659,17 @@ export default function App() {
                             </button>
                         )}
 
-                        {(hasPrivilege('EXECUTE') || currentUser?.role === 'Owner') && (
-                            <button onClick={() => setActiveTab('terminal')}
-                                className={`w-full flex items-center gap-4 px-4 py-3 rounded-lg transition-all group ${
-                                    activeTab === 'terminal' 
-                                    ? 'bg-brand/10 text-brand border border-brand/20 shadow-sm' 
-                                    : 'text-text-secondary hover:bg-bg-elevated hover:text-text-primary'
-                                }`}>
-                                <Terminal size={20} className={activeTab === 'terminal' ? 'text-brand' : 'text-text-muted group-hover:text-text-primary'} />
-                                <span className="text-sm font-semibold">Terminal</span>
-                            </button>
-                        )}
+                        <button onClick={() => setActiveTab('terminal')}
+                            className={`w-full flex items-center gap-4 px-4 py-3 rounded-lg transition-all group ${
+                                activeTab === 'terminal' 
+                                ? 'bg-brand/10 text-brand border border-brand/20 shadow-sm' 
+                                : 'text-text-secondary hover:bg-bg-elevated hover:text-text-primary'
+                            }`}>
+                            <Terminal size={20} className={activeTab === 'terminal' ? 'text-brand' : 'text-text-muted group-hover:text-text-primary'} />
+                            <span className="text-sm font-semibold">Terminal</span>
+                        </button>
 
-                        {['Admin', 'Owner'].includes(currentUser?.role) && (
+                        {['Admin', 'Owner'].includes(currentOrg?.role) && (
                             <button onClick={() => { setActiveTab('approvals'); fetchPendingRequests(currentOrg?.id); }}
                                 className={`w-full flex items-center gap-4 px-4 py-3 rounded-lg transition-all group relative ${
                                     activeTab === 'approvals' 
@@ -2525,6 +2681,18 @@ export default function App() {
                                 {pendingRequests.length > 0 && (
                                     <span className="ml-auto bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-lg shadow-red-500/30">{pendingRequests.length}</span>
                                 )}
+                            </button>
+                        )}
+
+                        {['Admin', 'Owner'].includes(currentOrg?.role) && (
+                            <button onClick={() => { setActiveTab('audit'); fetchAuditLogs(currentOrg?.id); }}
+                                className={`w-full flex items-center gap-4 px-4 py-3 rounded-lg transition-all group ${
+                                    activeTab === 'audit' 
+                                    ? 'bg-brand/10 text-brand border border-brand/20 shadow-sm' 
+                                    : 'text-text-secondary hover:bg-bg-elevated hover:text-text-primary'
+                                }`}>
+                                <FileText size={20} className={activeTab === 'audit' ? 'text-brand' : 'text-text-muted group-hover:text-text-primary'} />
+                                <span className="text-sm font-semibold">Audit Logs</span>
                             </button>
                         )}
                     </nav>
@@ -2573,7 +2741,7 @@ export default function App() {
 
             {/* Main Content */}
             <main className="flex-1 flex flex-col h-screen overflow-hidden">
-                {['Admin', 'Owner'].includes(currentUser?.role) && pendingRequests.length > 0 && activeTab !== 'approvals' && (
+                {['Admin', 'Owner'].includes(currentOrg?.role) && pendingRequests.length > 0 && activeTab !== 'approvals' && (
                     <div className="bg-brand/10 border-b border-brand/20 p-4 flex items-center justify-between shrink-0">
                         <div className="flex items-center gap-2 text-brand text-sm font-medium">
                             <span className="relative flex h-3 w-3">
@@ -2616,6 +2784,7 @@ export default function App() {
                         {activeTab === 'details' && renderOrgDetails()}
                         {activeTab === 'users' && renderUsers()}
                         {activeTab === 'groups' && renderGroups()}
+                        {activeTab === 'audit' && renderAuditLogs()}
                         {activeTab === 'profile' && renderProfile()}
                         {activeTab === 'infra' && (
                             <div className="flex flex-col items-center justify-center p-12 text-center text-text-muted h-full border border-dashed border-border-strong rounded-lg">
