@@ -433,7 +433,7 @@ app.get('/api/resources', authenticate, async (req, res) => {
             const result = await query.where('orgId', '==', orgId).get();
             let resources = result.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-            // Filter resources based on allowedGroups and allowedRoles
+            // Filter resources based on allowedGroups, allowedRoles, and provisionRoles
             if (!isAllowedAll) {
                 resources = resources.filter(resourceData => {
                     const groupsEmpty = !resourceData.allowedGroups || resourceData.allowedGroups.length === 0;
@@ -441,8 +441,10 @@ app.get('/api/resources', authenticate, async (req, res) => {
                     
                     const groupAllowed = !groupsEmpty && userGroupId && resourceData.allowedGroups.includes(userGroupId);
                     const roleAllowed = !rolesEmpty && userRole && resourceData.allowedRoles.includes(userRole);
+                    const provisionRoleAllowed = resourceData.provisionRoles && resourceData.provisionRoles[req.user.uid];
+                    const groupRoleAllowed = resourceData.provisionGroupRoles && userGroupId && resourceData.provisionGroupRoles[userGroupId];
 
-                    return (groupsEmpty && rolesEmpty) || groupAllowed || roleAllowed;
+                    return (groupsEmpty && rolesEmpty) || groupAllowed || roleAllowed || provisionRoleAllowed || groupRoleAllowed;
                 });
             }
 
@@ -489,26 +491,36 @@ app.get('/api/resources/:id/detail', authenticate, async (req, res) => {
         const rolesEmpty = !resource.allowedRoles || resource.allowedRoles.length === 0;
 
         // Filter members to only those with access (or all if no restriction)
-        if (!groupsEmpty || !rolesEmpty) {
+        if (!groupsEmpty || !rolesEmpty || resource.provisionRoles) {
             members = members.filter(m => {
                 const groupAllowed = !groupsEmpty && m.groupId && resource.allowedGroups.includes(m.groupId);
                 const roleAllowed = !rolesEmpty && m.role && resource.allowedRoles.includes(m.role);
-                return groupAllowed || roleAllowed;
+                const provisionRoleAllowed = resource.provisionRoles && resource.provisionRoles[m.userId];
+                const groupProvisionRoleAllowed = resource.provisionGroupRoles && m.groupId && resource.provisionGroupRoles[m.groupId];
+                return groupAllowed || roleAllowed || provisionRoleAllowed || groupProvisionRoleAllowed || (groupsEmpty && rolesEmpty);
             });
         }
 
         // Enrich with group name and task assignment
-        const enriched = members.map(m => ({
-            uid: m.userId,
-            email: m.email || m.userEmail || '—',
-            role: m.role || '—',
-            groupId: m.groupId || null,
-            groupName: m.groupId ? (groupsById[m.groupId] || 'Unknown Group') : '—',
-            taskTitle: m.taskTitle || null,
-            taskStatus: m.taskStatus || null,
-            workDetails: m.workDetails || null,
-            joinedAt: m.joinedAt || null
-        }));
+        const enriched = members.map(m => {
+            const userProvRole = resource.provisionRoles?.[m.userId] || null;
+            const groupProvRole = resource.provisionGroupRoles?.[m.groupId] || null;
+            
+            return {
+                uid: m.userId,
+                email: m.email || m.userEmail || '—',
+                role: m.role || '—',
+                provisionRole: userProvRole,
+                groupProvisionRole: groupProvRole,
+                effectiveProvisionRole: userProvRole || groupProvRole || null,
+                groupId: m.groupId || null,
+                groupName: m.groupId ? (groupsById[m.groupId] || 'Unknown Group') : '—',
+                taskTitle: m.taskTitle || null,
+                taskStatus: m.taskStatus || null,
+                workDetails: m.workDetails || null,
+                joinedAt: m.joinedAt || null
+            };
+        });
 
         res.json({ resource, members: enriched });
     } catch (err) {
@@ -643,6 +655,102 @@ app.put('/api/resources/:id', authenticate, async (req, res) => {
 
         await docRef.update(updates);
         res.json({ message: 'Updated', source: 'firestore' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Update resource provision roles (granular permissions)
+app.put('/api/resources/:id/roles', authenticate, async (req, res) => {
+    try {
+        const { orgId, targetUid, targetGroupId, newRole } = req.body;
+        if (!orgId || (!targetUid && !targetGroupId) || newRole === undefined) {
+            return res.status(400).json({ error: 'orgId, (targetUid or targetGroupId), and newRole are required' });
+        }
+        
+        // validate newRole
+        if (newRole !== null && !['Administration', 'Editor', 'Viewer'].includes(newRole)) {
+            return res.status(400).json({ error: 'Invalid role. Must be Administration, Editor, Viewer, or null (to remove)' });
+        }
+
+        const docRef = db.collection('resources').doc(req.params.id);
+        const doc = await docRef.get();
+        if (!doc.exists) return res.status(404).json({ error: 'Resource not found' });
+        
+        const resourceData = doc.data();
+        if (resourceData.orgId !== orgId) return res.status(403).json({ error: 'Org mismatch' });
+
+        // Authorization Check
+        let callerProvisionRole = resourceData.provisionRoles?.[req.user.uid];
+        let isAuthorized = false;
+
+        if (req.userData.isSystemAdmin) {
+            isAuthorized = true;
+            callerProvisionRole = 'Administration'; // override for logic
+        } else {
+            const memberId = `${orgId}_${req.user.uid}`;
+            const memberDoc = await db.collection('org_members').doc(memberId).get();
+            if (memberDoc.exists) {
+                const data = memberDoc.data();
+                
+                // Get caller's group provision role if any
+                const callerGroupProvRole = data.groupId ? (resourceData.provisionGroupRoles?.[data.groupId] || null) : null;
+                
+                // Effective role logic
+                const effectiveCallerRole = callerProvisionRole || callerGroupProvRole;
+
+                if (['Owner', 'Admin', 'Manager'].includes(data.role) || resourceData.creatorUid === req.user.uid) {
+                    isAuthorized = true;
+                    callerProvisionRole = 'Administration'; // implicit highest role
+                } else if (effectiveCallerRole === 'Administration' || effectiveCallerRole === 'Editor') {
+                    isAuthorized = true;
+                    // For logic below, we need the effective one
+                    callerProvisionRole = effectiveCallerRole;
+                }
+            }
+        }
+
+        if (!isAuthorized) {
+            logActivity(req, 'ACCESS_DENIED', { reason: 'Unauthorized attempt to modify provision roles', resourceId: req.params.id, orgId });
+            return res.status(403).json({ error: 'Access denied. You must be an Administrator or Editor of this provision.' });
+        }
+
+        // Editor Role Restrictions
+        const currentTargetRole = targetGroupId 
+            ? resourceData.provisionGroupRoles?.[targetGroupId] 
+            : resourceData.provisionRoles?.[targetUid];
+
+        if (callerProvisionRole === 'Editor') {
+            if (newRole === 'Administration' || currentTargetRole === 'Administration') {
+                logActivity(req, 'ACCESS_DENIED', { reason: 'Editor attempted to modify Administration role', resourceId: req.params.id, orgId, targetUid, targetGroupId });
+                return res.status(403).json({ error: 'Editors cannot grant or revoke Administration roles.' });
+            }
+        }
+
+        // Update the provisionRoles or provisionGroupRoles map
+        const updates = {};
+        const fieldPrefix = targetGroupId ? 'provisionGroupRoles' : 'provisionRoles';
+        const targetId = targetGroupId || targetUid;
+
+        if (newRole === null) {
+            updates[`${fieldPrefix}.${targetId}`] = admin.firestore.FieldValue.delete();
+        } else {
+            updates[`${fieldPrefix}.${targetId}`] = newRole;
+        }
+
+        updates.logs = admin.firestore.FieldValue.arrayUnion({
+            action: 'Edited',
+            uid: req.user.uid,
+            userName: req.userData?.displayName || req.userData?.email || req.user.email || 'Unknown',
+            email: req.user.email || 'unknown',
+            changes: `Provision Role updated for ${targetGroupId ? 'group' : 'user'} ${targetId} to ${newRole || 'None'}`,
+            storage: 'Firestore',
+            timestamp: new Date().toISOString()
+        });
+
+        await docRef.update(updates);
+        logActivity(req, 'PROVISION_ROLE_UPDATED', { resourceId: req.params.id, orgId, targetUid, targetGroupId, newRole });
+        res.json({ message: 'Provision role updated successfully', source: 'firestore' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

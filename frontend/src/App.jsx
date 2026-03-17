@@ -104,7 +104,8 @@ export default function App() {
     const [provisionDetail, setProvisionDetail] = useState([]); // {resource, members[]}
     const [provisionDetailLoading, setProvisionDetailLoading] = useState(false);
     const [selectedGroupDetail, setSelectedGroupDetail] = useState(null);
-    const [detailTab, setDetailTab] = useState('members'); // 'members' | 'manage'
+    const [detailTab, setDetailTab] = useState('members'); // 'members' | 'permissions' | 'manage'
+    const [roleSubTab, setRoleSubTab] = useState('Administration'); // 'Administration' | 'Editor' | 'Viewer'
     const [assigningGroup, setAssigningGroup] = useState(null);
     const [userOrgs, setUserOrgs] = useState([]);
     const [orgMembers, setOrgMembers] = useState([]);
@@ -119,6 +120,7 @@ export default function App() {
     const [auditLogs, setAuditLogs] = useState([]);
     const [pendingProvisions, setPendingProvisions] = useState([]);
     const [approvalSubTab, setApprovalSubTab] = useState('requests'); // 'requests' | 'staging'
+    const [rolesPageSubTab, setRolesPageSubTab] = useState('Administration'); // 'Administration' | 'Editor' | 'Viewer'
 
     // Theme Management
     const [theme, setTheme] = useState(localStorage.getItem('nexusguard_theme') || 'dark');
@@ -537,8 +539,10 @@ export default function App() {
             if (res.status === 202 || data.staged) {
                 showToast('Provision staged — awaiting admin approval.', 'info');
                 fetchPendingProvisions(currentOrg.id);
-                setActiveTab('approvals');
-                setApprovalSubTab('staging');
+                if (['Admin', 'Owner'].includes(currentOrg?.role)) {
+                    setActiveTab('approvals');
+                    setApprovalSubTab('staging');
+                }
             } else if (!res.ok) {
                 throw new Error(data.error || 'Failed to create resource');
             } else {
@@ -833,6 +837,11 @@ export default function App() {
         if (!currentUser) return false;
         if (['Owner', 'Admin'].includes(currentUser.role)) return true;
         
+        // Provision-level Administration role grants edit access (user or group)
+        const memberData = orgMembers.find(m => m.uid === currentUser.uid);
+        if (res.provisionRoles && res.provisionRoles[currentUser.uid] === 'Administration') return true;
+        if (res.provisionGroupRoles && memberData?.groupId && res.provisionGroupRoles[memberData.groupId] === 'Administration') return true;
+
         if (res.type === 'Folder') {
             if (!['Manager'].includes(currentUser.role)) {
                 return false;
@@ -845,13 +854,54 @@ export default function App() {
         const rolesEmpty = !res.allowedRoles || res.allowedRoles.length === 0;
         if (groupsEmpty && rolesEmpty) return true;
         
-        const memberData = orgMembers.find(m => m.uid === currentUser.uid);
         if (!memberData) return false;
 
         const groupAllowed = !groupsEmpty && memberData.groupId && res.allowedGroups.includes(memberData.groupId);
         const roleAllowed = !rolesEmpty && res.allowedRoles.includes(memberData.role);
 
         return groupAllowed || roleAllowed;
+    };
+
+    const canManageProvisionRoles = (res) => {
+        if (!currentUser) return false;
+        if (['Owner', 'Admin'].includes(currentUser.role)) return true;
+        if (res.creatorUid === currentUser.uid) return true;
+        const memberData = orgMembers.find(m => m.uid === currentUser.uid);
+        const pRoleUser = res.provisionRoles?.[currentUser.uid];
+        const pRoleGroup = memberData?.groupId ? (res.provisionGroupRoles?.[memberData.groupId] || null) : null;
+        const pRole = pRoleUser || pRoleGroup;
+        return pRole === 'Administration' || pRole === 'Editor';
+    };
+
+    const handleUpdateProvisionRole = async (resourceId, targetId, newRole, isGroup = false) => {
+        try {
+            const body = { orgId: currentOrg.id, newRole: newRole === 'None' ? null : newRole };
+            if (isGroup) body.targetGroupId = targetId;
+            else body.targetUid = targetId;
+
+            await fetchWithAuth(`/resources/${resourceId}/roles`, firebaseUser, {
+                method: 'PUT',
+                body: JSON.stringify(body)
+            });
+            showToast(`Provision role updated successfully`, 'success');
+            
+            // Refresh the provision detail
+            const updatedRes = { ...resources.find(r => r.id === resourceId) };
+            if (isGroup) {
+                if (!updatedRes.provisionGroupRoles) updatedRes.provisionGroupRoles = {};
+                if (newRole === 'None') delete updatedRes.provisionGroupRoles[targetId];
+                else updatedRes.provisionGroupRoles[targetId] = newRole;
+            } else {
+                if (!updatedRes.provisionRoles) updatedRes.provisionRoles = {};
+                if (newRole === 'None') delete updatedRes.provisionRoles[targetId];
+                else updatedRes.provisionRoles[targetId] = newRole;
+            }
+            
+            if (selectedResource?.id === resourceId) setSelectedResource(updatedRes);
+            setResources(prev => prev.map(r => r.id === resourceId ? updatedRes : r));
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
     };
 
     // --- LOADING STATE ---
@@ -1374,13 +1424,14 @@ export default function App() {
                         </div>
 
                         <div className="flex border-b border-border-strong bg-bg-dark/40 shrink-0 overflow-x-auto no-scrollbar">
-                            {['members', 'logs', 'media', 'manage'].map(tab => (
+                            {['members', 'permissions', 'logs', 'media', 'manage'].map(tab => (
                                 <button
                                     key={tab}
                                     onClick={() => setDetailTab(tab)}
                                     className={`px-6 py-3 text-sm font-medium transition-colors capitalize border-b-2 whitespace-nowrap ${detailTab === tab ? 'text-brand border-brand' : 'text-text-muted border-transparent hover:text-text-primary'}`}
                                 >
                                     {tab === 'members' && <div className="flex items-center gap-2"><Users size={14} /> Members</div>}
+                                    {tab === 'permissions' && <div className="flex items-center gap-2"><Shield size={14} /> Roles & Permissions</div>}
                                     {tab === 'logs' && <div className="flex items-center gap-2"><Activity size={14} /> Log Activity</div>}
                                     {tab === 'media' && <div className="flex items-center gap-2"><FileText size={14} /> Media</div>}
                                     {tab === 'manage' && <div className="flex items-center gap-2"><Settings size={14} /> Manage</div>}
@@ -1439,7 +1490,7 @@ export default function App() {
                                                                 
                                                                 {m.uid === currentUser?.uid && m.taskStatus && m.taskStatus !== 'done' && (
                                                                     <button 
-                                                                        onClick={() => handleCompleteTask(m.memberId)}
+                                                                        onClick={() => {}}
                                                                         className="p-1 hover:bg-green-500/20 text-green-400 rounded transition-colors"
                                                                         title="Mark as Done"
                                                                     >
@@ -1607,6 +1658,163 @@ export default function App() {
                                     </div>
                                 </div>
                             )}
+
+                            {/* === PERMISSIONS TAB === */}
+                            {detailTab === 'permissions' && (() => {
+                                const canManage = canManageProvisionRoles(selectedResource);
+                                const callerProvRole = selectedResource.provisionRoles?.[currentUser?.uid];
+                                const isCallerEditor = callerProvRole === 'Editor' && !['Owner', 'Admin'].includes(currentUser?.role);
+
+                                if (!canManage) {
+                                    return (
+                                        <div className="flex flex-col items-center justify-center py-20 text-text-muted">
+                                            <Lock size={40} className="mb-3 opacity-30" />
+                                            <p className="text-sm">You don't have permission to manage roles for this provision.</p>
+                                        </div>
+                                    );
+                                }
+
+                                return (
+                                    <div className="p-6 space-y-6">
+                                        <div className="flex border-b border-border-strong mb-2 overflow-x-auto no-scrollbar">
+                                            {['Administration', 'Editor', 'Viewer'].map(rt => (
+                                                <button
+                                                    key={rt}
+                                                    onClick={() => setRoleSubTab(rt)}
+                                                    className={`px-6 py-2.5 text-sm font-bold tracking-wide transition-all border-b-2 whitespace-nowrap ${
+                                                        roleSubTab === rt 
+                                                            ? (rt === 'Administration' ? 'border-purple-500 text-purple-400 bg-purple-500/10' :
+                                                               rt === 'Editor' ? 'border-blue-500 text-blue-400 bg-blue-500/10' :
+                                                               'border-emerald-500 text-emerald-400 bg-emerald-500/10')
+                                                            : 'border-transparent text-text-muted hover:text-text-primary hover:bg-bg-elevated'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center gap-2">
+                                                        {rt === 'Administration' && <Shield size={14} />}
+                                                        {rt === 'Editor' && <Edit2 size={14} />}
+                                                        {rt === 'Viewer' && <Search size={14} />}
+                                                        {rt}
+                                                    </div>
+                                                </button>
+                                            ))}
+                                        </div>
+
+                                        <div className="bg-bg-dark/60 border border-border-strong rounded-xl p-4">
+                                            {roleSubTab === 'Administration' && <p className="text-xs text-purple-300/80 leading-relaxed"><strong>Administration:</strong> Full control over this provision. Can read, write, create, delete, update, and assign members to any role.</p>}
+                                            {roleSubTab === 'Editor' && <p className="text-xs text-blue-300/80 leading-relaxed"><strong>Editor:</strong> Can edit resources inside this provision, and can assign members to the Editor or Viewer roles. Cannot grant or revoke Administration.</p>}
+                                            {roleSubTab === 'Viewer' && <p className="text-xs text-emerald-300/80 leading-relaxed"><strong>Viewer:</strong> Read-only access to view provision resources.</p>}
+                                        </div>
+
+                                        <div className="flex gap-3">
+                                            <div className="flex-1">
+                                                <select id="addUserToRoleSelect" className="bg-bg-dark border border-border-strong rounded-lg px-4 py-2 text-sm w-full focus:border-brand focus:outline-none text-text-primary">
+                                                    <optgroup label="Individuals">
+                                                        {orgMembers.filter(m => selectedResource.provisionRoles?.[m.uid] !== roleSubTab).map(m => (
+                                                            <option key={m.uid} value={`user:${m.uid}`}>{m.email || m.userEmail}</option>
+                                                        ))}
+                                                    </optgroup>
+                                                    <optgroup label="Security Groups">
+                                                        {orgGroups.filter(g => selectedResource.provisionGroupRoles?.[g.id] !== roleSubTab).map(g => (
+                                                            <option key={g.id} value={`group:${g.id}`}>{g.name}</option>
+                                                        ))}
+                                                    </optgroup>
+                                                </select>
+                                            </div>
+                                            <button 
+                                                onClick={() => {
+                                                    const selectEl = document.getElementById('addUserToRoleSelect');
+                                                    const targetVal = selectEl.value;
+                                                    if (targetVal) {
+                                                        const [type, id] = targetVal.split(':');
+                                                        handleUpdateProvisionRole(selectedResource.id, id, roleSubTab, type === 'group');
+                                                        selectEl.value = '';
+                                                    } else {
+                                                        showToast('Please select a user or group first', 'error');
+                                                    }
+                                                }}
+                                                className={`px-5 py-2 rounded-lg text-sm font-bold transition-all shadow-lg ${
+                                                    (isCallerEditor && roleSubTab === 'Administration') 
+                                                    ? 'bg-bg-elevated text-text-muted cursor-not-allowed border border-border-strong/50' 
+                                                    : 'bg-brand text-white hover:bg-brand-hover shadow-brand/20'
+                                                }`}
+                                                disabled={isCallerEditor && roleSubTab === 'Administration'}
+                                            >
+                                                Assign Access
+                                            </button>
+                                        </div>
+
+                                        {(() => {
+                                            const userAssignments = orgMembers
+                                                .filter(m => selectedResource.provisionRoles?.[m.uid] === roleSubTab)
+                                                .map(m => ({ type: 'user', id: m.uid, name: m.email || m.userEmail, role: m.role }));
+                                            
+                                            const groupAssignments = orgGroups
+                                                .filter(g => selectedResource.provisionGroupRoles?.[g.id] === roleSubTab)
+                                                .map(g => ({ type: 'group', id: g.id, name: g.name, role: 'Group' }));
+                                            
+                                            const allAssignments = [...userAssignments, ...groupAssignments];
+
+                                            if (allAssignments.length === 0) {
+                                                return (
+                                                    <div className="text-center py-12 text-text-muted bg-bg-surface/50 rounded-xl border border-dashed border-border-strong">
+                                                        <Users size={32} className="mx-auto mb-3 opacity-20" />
+                                                        <p className="text-sm font-medium">No one assigned to {roleSubTab}</p>
+                                                    </div>
+                                                );
+                                            }
+
+                                            return (
+                                                <div className="bg-bg-surface border border-border-strong rounded-xl overflow-hidden">
+                                                    <table className="w-full text-sm text-left">
+                                                        <thead className="bg-bg-elevated border-b border-border-strong">
+                                                            <tr>
+                                                                <th className="px-5 py-3 font-semibold text-text-secondary text-xs uppercase">Entity</th>
+                                                                <th className="px-5 py-3 font-semibold text-text-secondary text-xs uppercase">Type / Role</th>
+                                                                <th className="px-5 py-3 font-semibold text-text-secondary text-xs uppercase text-right">Actions</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody className="divide-y divide-border-strong/40">
+                                                            {allAssignments.map(asgn => (
+                                                                <tr key={`${asgn.type}-${asgn.id}`} className="hover:bg-bg-elevated/60 transition-colors">
+                                                                    <td className="px-5 py-3.5">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${asgn.type === 'user' ? 'bg-brand/20 text-brand' : 'bg-purple-900/30 text-purple-300'}`}>
+                                                                                {asgn.type === 'user' ? <User size={12} /> : <Users size={12} />}
+                                                                            </div>
+                                                                            <div className="min-w-0">
+                                                                                <span className="text-text-primary text-xs font-medium block truncate">{asgn.name}</span>
+                                                                                {asgn.id === currentUser?.uid && <span className="text-[9px] text-brand font-bold uppercase tracking-widest leading-none">You</span>}
+                                                                            </div>
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-5 py-3.5">
+                                                                        <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${asgn.type === 'user' ? 'bg-bg-dark text-text-secondary' : 'bg-purple-900/20 text-purple-300'}`}>
+                                                                            {asgn.role}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-5 py-3.5 text-right">
+                                                                        <button 
+                                                                            onClick={() => handleUpdateProvisionRole(selectedResource.id, asgn.id, 'None', asgn.type === 'group')}
+                                                                            disabled={isCallerEditor && roleSubTab === 'Administration'}
+                                                                            className={`text-xs font-medium px-3 py-1.5 rounded transition-colors ${
+                                                                                (isCallerEditor && roleSubTab === 'Administration')
+                                                                                ? 'text-text-muted bg-bg-dark cursor-not-allowed'
+                                                                                : 'text-red-400 hover:text-white hover:bg-red-500'
+                                                                            }`}
+                                                                        >
+                                                                            Remove
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                );
+                            })()}
 
                             {/* === MANAGE TAB === */}
                             {detailTab === 'manage' && (() => {
@@ -2682,6 +2890,19 @@ export default function App() {
                             </button>
                         ))}
 
+                        {['Owner', 'Admin', 'Manager'].includes(currentOrg?.role) && (
+                            <button onClick={() => setActiveTab('roles')}
+                                className={`w-full flex items-center gap-4 px-4 py-3 rounded-lg transition-all group ${
+                                    activeTab === 'roles'
+                                    ? 'bg-brand/10 text-brand border border-brand/20 shadow-sm'
+                                    : 'text-text-secondary hover:bg-bg-elevated hover:text-text-primary'
+                                }`}>
+                                <Shield size={20} className={activeTab === 'roles' ? 'text-brand' : 'text-text-muted group-hover:text-text-primary'} />
+                                <span className="text-sm font-semibold">Roles &amp; Permissions</span>
+                                {activeTab === 'roles' && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-brand shadow-[0_0_8px_rgba(var(--brand-rgb),0.6)]"></div>}
+                            </button>
+                        )}
+
                         {(hasPrivilege('INFRASTRUCTURE') || currentUser?.role === 'Owner') && (
                             <button onClick={() => setActiveTab('infra')}
                                 className={`w-full flex items-center gap-4 px-4 py-3 rounded-lg transition-all group ${
@@ -2835,6 +3056,433 @@ export default function App() {
                         {activeTab === 'groups' && renderGroups()}
                         {activeTab === 'audit' && renderAuditLogs()}
                         {activeTab === 'profile' && renderProfile()}
+                        {activeTab === 'roles' && (() => {
+                            if (!['Owner', 'Admin', 'Manager'].includes(currentOrg?.role)) {
+                                return (
+                                    <div className="flex flex-col items-center justify-center p-12 text-center h-[60vh]">
+                                        <div className="w-16 h-16 bg-red-500/10 rounded-full flex items-center justify-center mb-6 border border-red-500/20">
+                                            <Lock className="text-red-500" size={32} />
+                                        </div>
+                                        <h3 className="text-2xl font-bold text-text-primary mb-2">Access Restricted</h3>
+                                        <p className="text-text-secondary max-w-sm">The Roles & Permissions module is only available to Organization Owners, Administrators, and Managers.</p>
+                                        <button 
+                                            onClick={() => setActiveTab('resources')}
+                                            className="mt-8 px-6 py-2 bg-brand text-white font-bold rounded-lg hover:bg-brand-hover transition-all"
+                                        >
+                                            Return to Provision Hub
+                                        </button>
+                                    </div>
+                                );
+                            }
+                            
+                            // Flattened assignments
+                            const getAssignmentsByRole = (targetRole) => {
+                                const assignments = [];
+                                resources.forEach(res => {
+                                    // User assignments
+                                    if (res.provisionRoles) {
+                                        Object.entries(res.provisionRoles).forEach(([uid, role]) => {
+                                            if (role === targetRole) {
+                                                const member = orgMembers.find(m => m.uid === uid) || { uid, email: 'Unknown User', role: 'Unknown' };
+                                                assignments.push({ resource: res, member, type: 'user' });
+                                            }
+                                        });
+                                    }
+                                    // Group assignments
+                                    if (res.provisionGroupRoles) {
+                                        Object.entries(res.provisionGroupRoles).forEach(([gid, role]) => {
+                                            if (role === targetRole) {
+                                                const group = orgGroups.find(g => g.id === gid) || { id: gid, name: 'Deleted Group' };
+                                                assignments.push({ resource: res, group, type: 'group' });
+                                            }
+                                        });
+                                    }
+                                });
+                                return assignments;
+                            };
+
+                            const manageableResources = resources.filter(r => canManageProvisionRoles(r));
+
+                            return (
+                                <div className="space-y-8">
+                                    {/* Page Header */}
+                                    <div>
+                                        <div className="flex items-center gap-3 mb-2">
+                                            <Shield className="text-brand" size={24} />
+                                            <h3 className="text-xl font-bold text-text-primary">Roles & Permissions</h3>
+                                        </div>
+                                        <p className="text-sm text-text-muted">Manage granular provision-level roles for organization members across all your provisions.</p>
+                                    </div>
+
+                                    {/* Role Legend */}
+                                    <div className="bg-bg-surface border border-border-subtle rounded-2xl p-5">
+                                        <div className="grid grid-cols-3 gap-6">
+                                            <div className="space-y-1.5">
+                                                <div className="text-xs font-bold text-purple-300 flex items-center gap-2"><Shield size={14} /> Administration</div>
+                                                <p className="text-[11px] text-text-muted leading-relaxed">Full control: read, write, create, delete, update, and assign members to this provision.</p>
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                <div className="text-xs font-bold text-blue-300 flex items-center gap-2"><Edit2 size={14} /> Editor</div>
+                                                <p className="text-[11px] text-text-muted leading-relaxed">Can edit member roles within the provision. Cannot grant or revoke Administration.</p>
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                <div className="text-xs font-bold text-emerald-300 flex items-center gap-2"><Search size={14} /> Viewer</div>
+                                                <p className="text-[11px] text-text-muted leading-relaxed">Read-only access. Can view provision resources but cannot modify anything.</p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Sub-Tab Navigation */}
+                                    <div className="flex gap-1 bg-bg-dark border border-border-strong rounded-xl p-1 w-fit">
+                                        {['Administration', 'Editor', 'Viewer'].map((tab) => (
+                                            <button
+                                                key={tab}
+                                                onClick={() => setRolesPageSubTab(tab)}
+                                                className={`flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-semibold transition-all ${
+                                                    rolesPageSubTab === tab ? 'bg-brand text-white shadow-md shadow-brand/30' : 'text-text-muted hover:text-text-primary'
+                                                }`}
+                                            >
+                                                {tab === 'Administration' && <Shield size={16} />}
+                                                {tab === 'Editor' && <Edit2 size={16} />}
+                                                {tab === 'Viewer' && <Search size={16} />}
+                                                {tab}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {rolesPageSubTab === 'Editor' ? (
+                                        /* Provisions List (Editor Tab) */
+                                        <div>
+                                            {resources.length === 0 ? (
+                                                <div className="flex flex-col items-center justify-center py-20 text-text-muted">
+                                                    <Database size={48} className="mb-4 opacity-20" />
+                                                    <p className="text-sm font-medium">No provisions available.</p>
+                                                    <p className="text-xs mt-1 opacity-60">Create provisions in the Provision Hub first.</p>
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-4">
+                                                    {resources.map(res => {
+                                                        const canManage = canManageProvisionRoles(res);
+                                                        const roleCount = res.provisionRoles ? Object.keys(res.provisionRoles).length : 0;
+
+                                                        return (
+                                                            <details key={res.id} className="bg-bg-surface border border-border-subtle rounded-2xl overflow-hidden group">
+                                                                <summary className="flex items-center gap-4 px-6 py-4 cursor-pointer hover:bg-bg-elevated/50 transition-colors list-none">
+                                                                    <div className="p-2 bg-brand/10 rounded-lg text-brand shrink-0">
+                                                                        {(() => { const IC = ICONS[res.type] || Folder; return <IC size={20} />; })()}
+                                                                    </div>
+                                                                    <div className="flex-1 min-w-0">
+                                                                        <div className="text-sm font-bold text-text-primary truncate">{res.name}</div>
+                                                                        <div className="flex items-center gap-2 mt-0.5">
+                                                                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${res.accessLevel === 'public' ? 'bg-green-900/50 text-green-300' : 'bg-yellow-900/50 text-yellow-300'}`}>{res.accessLevel || 'private'}</span>
+                                                                            <span className="text-[10px] text-text-muted capitalize">{res.type}</span>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="flex items-center gap-3 shrink-0">
+                                                                        {roleCount > 0 && (
+                                                                            <span className="text-[10px] bg-brand/10 text-brand border border-brand/20 px-2 py-0.5 rounded-full font-bold">{roleCount} role{roleCount !== 1 ? 's' : ''}</span>
+                                                                        )}
+                                                                        {!canManage && <Lock size={14} className="text-text-muted opacity-50" />}
+                                                                        <svg className="w-4 h-4 text-text-muted transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                                                                    </div>
+                                                                </summary>
+
+                                                                <div className="border-t border-border-strong">
+                                                                    {!canManage ? (
+                                                                        <div className="flex items-center gap-3 px-6 py-8 text-text-muted">
+                                                                            <Lock size={20} className="opacity-40" />
+                                                                            <p className="text-sm">You don't have permission to manage roles for this provision.</p>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div className="p-6 space-y-8">
+                                                                            {/* Section 1: Assigned Groups */}
+                                                                            <div>
+                                                                                <div className="flex items-center justify-between mb-4">
+                                                                                    <h5 className="text-xs font-bold text-text-secondary uppercase tracking-wider flex items-center gap-2">
+                                                                                        <Users size={14} /> Assigned Security Groups
+                                                                                    </h5>
+                                                                                    <div className="flex gap-2">
+                                                                                        <select 
+                                                                                            id={`addGroupTo${res.id}`}
+                                                                                            className="bg-bg-dark border border-border-strong rounded-lg px-3 py-1.5 text-xs text-text-primary focus:border-brand focus:outline-none"
+                                                                                        >
+                                                                                            <option value="">Select Group...</option>
+                                                                                            {orgGroups.map(g => (
+                                                                                                <option key={g.id} value={g.id}>{g.name}</option>
+                                                                                            ))}
+                                                                                        </select>
+                                                                                        <button 
+                                                                                            onClick={() => {
+                                                                                                const gid = document.getElementById(`addGroupTo${res.id}`).value;
+                                                                                                if (gid) handleUpdateProvisionRole(res.id, gid, 'Editor', true);
+                                                                                            }}
+                                                                                            className="px-3 py-1.5 bg-brand text-white rounded-lg text-xs font-bold hover:bg-brand-hover transition-colors"
+                                                                                        >
+                                                                                            Add Group
+                                                                                        </button>
+                                                                                    </div>
+                                                                                </div>
+                                                                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                                                    {Object.entries(res.provisionGroupRoles || {}).map(([groupId, role]) => {
+                                                                                        const group = orgGroups.find(g => g.id === groupId);
+                                                                                        const groupMembers = orgMembers.filter(m => m.groupId === groupId);
+                                                                                        return (
+                                                                                            <div key={groupId} className="bg-bg-dark border border-border-strong rounded-xl overflow-hidden">
+                                                                                                <div className="px-4 py-3 bg-bg-elevated/40 border-b border-border-strong flex items-center justify-between">
+                                                                                                    <div className="flex items-center gap-2">
+                                                                                                        <Users size={14} className="text-brand" />
+                                                                                                        <span className="text-xs font-bold text-text-primary truncate">{group?.name || 'Deleted Group'}</span>
+                                                                                                    </div>
+                                                                                                    <select
+                                                                                                        value={role}
+                                                                                                        onChange={(e) => handleUpdateProvisionRole(res.id, groupId, e.target.value, true)}
+                                                                                                        className="bg-transparent border-none text-[10px] font-bold text-brand focus:ring-0 cursor-pointer"
+                                                                                                    >
+                                                                                                        <option value="Administration">Administration</option>
+                                                                                                        <option value="Editor">Editor</option>
+                                                                                                        <option value="Viewer">Viewer</option>
+                                                                                                        <option value="None">Remove</option>
+                                                                                                    </select>
+                                                                                                </div>
+                                                                                                <div className="p-3 bg-bg-surface/30">
+                                                                                                    <div className="text-[10px] text-text-muted mb-2 font-medium uppercase tracking-widest">{groupMembers.length} Members</div>
+                                                                                                    <div className="space-y-1.5">
+                                                                                                        {groupMembers.map(m => {
+                                                                                                            const userOverride = res.provisionRoles?.[m.uid];
+                                                                                                            return (
+                                                                                                                <div key={m.uid} className="flex items-center justify-between text-[11px]">
+                                                                                                                    <span className="text-text-secondary truncate pr-2">{m.email || m.userEmail}</span>
+                                                                                                                    <select
+                                                                                                                        value={userOverride || 'Group Default'}
+                                                                                                                        onChange={(e) => handleUpdateProvisionRole(res.id, m.uid, e.target.value === 'Group Default' ? 'None' : e.target.value)}
+                                                                                                                        className={`bg-bg-elevated border-none px-1 py-0.5 rounded text-[10px] focus:ring-0 cursor-pointer ${userOverride ? 'text-brand font-bold' : 'text-text-muted'}`}
+                                                                                                                    >
+                                                                                                                        <option value="Group Default">Group Default ({role})</option>
+                                                                                                                        <option value="Administration">Administration</option>
+                                                                                                                        <option value="Editor">Editor</option>
+                                                                                                                        <option value="Viewer">Viewer</option>
+                                                                                                                    </select>
+                                                                                                                </div>
+                                                                                                            );
+                                                                                                        })}
+                                                                                                    </div>
+                                                                                                </div>
+                                                                                            </div>
+                                                                                        );
+                                                                                    })}
+                                                                                </div>
+                                                                            </div>
+
+                                                                            {/* Section 2: Special Users (Direct Assignments) */}
+                                                                            <div>
+                                                                                <div className="flex items-center justify-between mb-4">
+                                                                                    <h5 className="text-xs font-bold text-text-secondary uppercase tracking-wider flex items-center gap-2">
+                                                                                        <User size={14} /> Special Users (Direct Access)
+                                                                                    </h5>
+                                                                                    <div className="flex gap-2">
+                                                                                        <select 
+                                                                                            id={`addUserTo${res.id}`}
+                                                                                            className="bg-bg-dark border border-border-strong rounded-lg px-3 py-1.5 text-xs text-text-primary focus:border-brand focus:outline-none"
+                                                                                        >
+                                                                                            <option value="">Select User...</option>
+                                                                                            {orgMembers.filter(m => !res.provisionGroupRoles?.[m.groupId]).map(m => (
+                                                                                                <option key={m.uid} value={m.uid}>{m.email || m.userEmail}</option>
+                                                                                            ))}
+                                                                                        </select>
+                                                                                        <button 
+                                                                                            onClick={() => {
+                                                                                                const uid = document.getElementById(`addUserTo${res.id}`).value;
+                                                                                                if (uid) handleUpdateProvisionRole(res.id, uid, 'Editor');
+                                                                                            }}
+                                                                                            className="px-3 py-1.5 bg-bg-elevated border border-border-strong text-text-primary rounded-lg text-xs font-bold hover:bg-bg-dark transition-colors"
+                                                                                        >
+                                                                                            Add Special User
+                                                                                        </button>
+                                                                                    </div>
+                                                                                </div>
+                                                                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                                                    {Object.entries(res.provisionRoles || {}).filter(([uid]) => {
+                                                                                        const m = orgMembers.find(member => member.uid === uid);
+                                                                                        return !m || !res.provisionGroupRoles?.[m.groupId];
+                                                                                    }).map(([uid, role]) => {
+                                                                                        const member = orgMembers.find(m => m.uid === uid);
+                                                                                        return (
+                                                                                            <div key={uid} className="bg-bg-dark border border-border-strong rounded-xl p-3 flex items-center justify-between">
+                                                                                                <div className="flex items-center gap-2 min-w-0">
+                                                                                                    <div className="w-6 h-6 rounded-full bg-brand/10 text-brand flex items-center justify-center text-[10px] font-bold">{(member?.email || '?')[0].toUpperCase()}</div>
+                                                                                                    <div className="min-w-0">
+                                                                                                        <div className="text-[11px] font-bold text-text-primary truncate">{member?.email || member?.userEmail || 'Unknown'}</div>
+                                                                                                        <div className="text-[9px] text-text-muted">Direct Access</div>
+                                                                                                    </div>
+                                                                                                </div>
+                                                                                                <select
+                                                                                                    value={role}
+                                                                                                    onChange={(e) => handleUpdateProvisionRole(res.id, uid, e.target.value)}
+                                                                                                    className="bg-transparent border-none text-[10px] font-bold text-brand focus:ring-0 cursor-pointer"
+                                                                                                >
+                                                                                                    <option value="Administration">Administration</option>
+                                                                                                    <option value="Editor">Editor</option>
+                                                                                                    <option value="Viewer">Viewer</option>
+                                                                                                    <option value="None">Remove</option>
+                                                                                                </select>
+                                                                                            </div>
+                                                                                        );
+                                                                                    })}
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            </details>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        /* Administration & Viewer Tabs */
+                                        <div className="space-y-6">
+                                            {/* Assignment Form */}
+                                            {manageableResources.length > 0 ? (
+                                                <div className="bg-bg-dark border border-border-strong rounded-xl p-5 shadow-sm">
+                                                    <h4 className="text-sm font-bold text-text-primary mb-3">Add {rolesPageSubTab}</h4>
+                                                    <div className="flex flex-col md:flex-row gap-3">
+                                                        <div className="flex-1 flex flex-col gap-1">
+                                                            <label className="text-[10px] text-text-muted font-bold uppercase ml-1">Target Member or Group</label>
+                                                            <select id={`add${rolesPageSubTab}Target`} className="w-full bg-bg-surface border border-border-strong rounded-lg px-4 py-2.5 text-sm focus:border-brand focus:outline-none text-text-primary">
+                                                                <optgroup label="Individuals">
+                                                                    {orgMembers.map(m => (
+                                                                        <option key={m.uid} value={`user:${m.uid}`}>{m.email || m.userEmail}</option>
+                                                                    ))}
+                                                                </optgroup>
+                                                                <optgroup label="Security Groups">
+                                                                    {orgGroups.map(g => (
+                                                                        <option key={g.id} value={`group:${g.id}`}>{g.name}</option>
+                                                                    ))}
+                                                                </optgroup>
+                                                            </select>
+                                                        </div>
+                                                        <div className="flex-1 flex flex-col gap-1">
+                                                            <label className="text-[10px] text-text-muted font-bold uppercase ml-1">Provision</label>
+                                                            <select id={`add${rolesPageSubTab}Provision`} className="w-full bg-bg-surface border border-border-strong rounded-lg px-4 py-2.5 text-sm focus:border-brand focus:outline-none text-text-primary">
+                                                                <option value="">Select Provision...</option>
+                                                                {manageableResources.map(r => (
+                                                                    <option key={r.id} value={r.id}>{r.name}</option>
+                                                                ))}
+                                                            </select>
+                                                        </div>
+                                                        <button 
+                                                            onClick={async () => {
+                                                                const target = document.getElementById(`add${rolesPageSubTab}Target`).value;
+                                                                const resId = document.getElementById(`add${rolesPageSubTab}Provision`).value;
+                                                                if (target && resId) {
+                                                                    const [type, id] = target.split(':');
+                                                                    await handleUpdateProvisionRole(resId, id, rolesPageSubTab, type === 'group');
+                                                                    document.getElementById(`add${rolesPageSubTab}Target`).value = '';
+                                                                    document.getElementById(`add${rolesPageSubTab}Provision`).value = '';
+                                                                } else {
+                                                                    showToast('Please select both a target and a provision.', 'error');
+                                                                }
+                                                            }}
+                                                            className="self-end px-8 py-2.5 bg-brand text-white rounded-lg text-sm font-bold shadow-lg shadow-brand/20 hover:bg-brand-hover transition-all whitespace-nowrap"
+                                                        >
+                                                            Assign {rolesPageSubTab}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <div className="bg-bg-dark border border-border-strong rounded-xl p-5 text-text-muted text-sm flex items-center gap-3">
+                                                    <Lock size={16} className="opacity-50" />
+                                                    You don't have permission to manage roles on any provisions.
+                                                </div>
+                                            )}
+
+                                            {/* Assignments Table */}
+                                            {(() => {
+                                                const currentAssignments = rolesPageSubTab === 'Administration' ? getAssignmentsByRole('Administration') : getAssignmentsByRole('Viewer');
+                                                if (currentAssignments.length === 0) {
+                                                    return (
+                                                        <div className="flex flex-col items-center justify-center py-20 text-text-muted bg-bg-surface rounded-2xl border border-dashed border-border-strong">
+                                                            <Users size={40} className="mb-4 opacity-20" />
+                                                            <p className="text-sm font-medium">No {rolesPageSubTab} assignments found across any provision.</p>
+                                                        </div>
+                                                    );
+                                                }
+                                                return (
+                                                    <div className="bg-bg-surface border border-border-strong rounded-xl overflow-hidden">
+                                                        <table className="w-full text-sm text-left">
+                                                            <thead className="bg-bg-elevated border-b border-border-strong">
+                                                                <tr>
+                                                                    <th className="px-5 py-3 font-semibold text-text-secondary text-xs uppercase">Entity</th>
+                                                                    <th className="px-5 py-3 font-semibold text-text-secondary text-xs uppercase">Type / Org Role</th>
+                                                                    <th className="px-5 py-3 font-semibold text-text-secondary text-xs uppercase">Provision</th>
+                                                                    <th className="px-5 py-3 font-semibold text-text-secondary text-xs uppercase text-right">Actions</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody className="divide-y divide-border-strong/40">
+                                                                {currentAssignments.map((assignment, idx) => {
+                                                                    const canManageThis = canManageProvisionRoles(assignment.resource);
+                                                                    const isUser = assignment.type === 'user';
+                                                                    const targetId = isUser ? assignment.member.uid : assignment.group.id;
+                                                                    const displayName = isUser ? (assignment.member.email || assignment.member.userEmail) : assignment.group.name;
+                                                                    const orgRole = isUser ? (assignment.member.role || '—') : 'Group';
+                                                                    
+                                                                    const pRoleUser = assignment.resource.provisionRoles?.[currentUser?.uid];
+                                                                    const callerIsEditor = pRoleUser === 'Editor' && !['Owner', 'Admin'].includes(currentUser?.role);
+                                                                    const disableRemove = !canManageThis || (callerIsEditor && rolesPageSubTab === 'Administration');
+                                                                    
+                                                                    return (
+                                                                        <tr key={`${assignment.resource.id}-${targetId}-${idx}`} className="hover:bg-bg-elevated/60 transition-colors">
+                                                                            <td className="px-5 py-3.5">
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${isUser ? 'bg-brand/20 text-brand' : 'bg-purple-900/30 text-purple-300'}`}>
+                                                                                        {isUser ? <User size={12} /> : <Users size={12} />}
+                                                                                    </div>
+                                                                                    <div className="min-w-0">
+                                                                                        <span className="text-text-primary text-xs font-medium block truncate" title={displayName}>{displayName}</span>
+                                                                                        {!isUser && <span className="text-[9px] text-purple-300 font-bold uppercase tracking-widest">Security Group</span>}
+                                                                                    </div>
+                                                                                </div>
+                                                                            </td>
+                                                                            <td className="px-5 py-3.5">
+                                                                                <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${isUser ? 'bg-bg-dark text-text-secondary' : 'bg-purple-900/20 text-purple-300'}`}>
+                                                                                    {orgRole}
+                                                                                </span>
+                                                                            </td>
+                                                                            <td className="px-5 py-3.5">
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className="p-1.5 bg-brand/10 rounded text-brand shrink-0">
+                                                                                        {(() => { const IC = ICONS[assignment.resource.type] || Folder; return <IC size={14} />; })()}
+                                                                                    </div>
+                                                                                    <span className="text-text-primary text-xs font-bold">{assignment.resource.name}</span>
+                                                                                </div>
+                                                                            </td>
+                                                                            <td className="px-5 py-3.5 text-right">
+                                                                                <button 
+                                                                                    onClick={() => handleUpdateProvisionRole(assignment.resource.id, targetId, 'None', !isUser)}
+                                                                                    disabled={disableRemove}
+                                                                                    className={`text-xs font-medium px-3 py-1.5 rounded transition-colors ${
+                                                                                        disableRemove
+                                                                                        ? 'text-text-muted bg-bg-dark cursor-not-allowed'
+                                                                                        : 'text-red-400 hover:text-white hover:bg-red-500'
+                                                                                    }`}
+                                                                                >
+                                                                                    Remove
+                                                                                </button>
+                                                                            </td>
+                                                                        </tr>
+                                                                    );
+                                                                })}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                );
+                                            })()}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })()}
                         {activeTab === 'infra' && (
                             <div className="flex flex-col items-center justify-center p-12 text-center text-text-muted h-full border border-dashed border-border-strong rounded-lg">
                                 <Server size={48} className="mb-4 text-brand opacity-80" />
@@ -2842,7 +3490,25 @@ export default function App() {
                                 <p className="max-w-md">Live Redis and PostgreSQL database provisioning module. Your INFRASTRUCTURE privileges allow managing cloud hardware nodes.</p>
                             </div>
                         )}
-                        {activeTab === 'approvals' && (
+                        {activeTab === 'approvals' && (() => {
+                            if (!['Admin', 'Owner'].includes(currentOrg?.role)) {
+                                return (
+                                    <div className="flex flex-col items-center justify-center p-12 text-center h-[60vh]">
+                                        <div className="w-16 h-16 bg-red-500/10 rounded-full flex items-center justify-center mb-6 border border-red-500/20">
+                                            <Lock className="text-red-500" size={32} />
+                                        </div>
+                                        <h3 className="text-2xl font-bold text-text-primary mb-2">Access Restricted</h3>
+                                        <p className="text-text-secondary max-w-sm">The Approvals module is only available to Organization Owners and Administrators.</p>
+                                        <button 
+                                            onClick={() => setActiveTab('resources')}
+                                            className="mt-8 px-6 py-2 bg-brand text-white font-bold rounded-lg hover:bg-brand-hover transition-all"
+                                        >
+                                            Return to Provision Hub
+                                        </button>
+                                    </div>
+                                );
+                            }
+                            return (
                             <div className="space-y-4">
                                 {/* Approvals Header */}
                                 <div className="flex items-center gap-3 mb-2">
@@ -2983,8 +3649,9 @@ export default function App() {
                                         )}
                                     </div>
                                 )}
-                            </div>
-                        )}
+                                    </div>
+                                );
+                            })()}
 
                     </div>
                 </div>
