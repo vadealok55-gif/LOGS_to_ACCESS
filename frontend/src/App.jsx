@@ -117,6 +117,8 @@ export default function App() {
     const [resendCooldown, setResendCooldown] = useState(0); // seconds remaining before resend allowed
     const [userActivity, setUserActivity] = useState([]);
     const [auditLogs, setAuditLogs] = useState([]);
+    const [pendingProvisions, setPendingProvisions] = useState([]);
+    const [approvalSubTab, setApprovalSubTab] = useState('requests'); // 'requests' | 'staging'
 
     // Theme Management
     const [theme, setTheme] = useState(localStorage.getItem('nexusguard_theme') || 'dark');
@@ -404,6 +406,7 @@ export default function App() {
         fetchPendingRequests(org.id);
         fetchOrgMembers(org.id);
         fetchOrgGroups(org.id);
+        if (['Owner', 'Admin'].includes(org.role)) fetchPendingProvisions(org.id);
     };
 
     const handleSwitchOrg = () => {
@@ -464,6 +467,37 @@ export default function App() {
         }
     };
 
+    const fetchPendingProvisions = async (orgId) => {
+        if (!firebaseUser || !orgId) return;
+        try {
+            const data = await fetchWithAuth(`/pending-provisions?orgId=${orgId}`, firebaseUser);
+            setPendingProvisions(data.provisions || []);
+        } catch {
+            setPendingProvisions([]);
+        }
+    };
+
+    const handleApproveStagedProvision = async (provisionId) => {
+        try {
+            await fetchWithAuth(`/pending-provisions/${provisionId}/approve`, firebaseUser, { method: 'POST' });
+            showToast('Provision approved and published to Resource Hub!', 'success');
+            fetchPendingProvisions(currentOrg?.id);
+            fetchResources(currentOrg?.id);
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    };
+
+    const handleDenyStagedProvision = async (provisionId) => {
+        try {
+            await fetchWithAuth(`/pending-provisions/${provisionId}/deny`, firebaseUser, { method: 'POST', body: JSON.stringify({ reason: 'Denied by admin' }) });
+            showToast('Provision denied and removed from staging.', 'info');
+            fetchPendingProvisions(currentOrg?.id);
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    };
+
     const handleApproveRequest = async (requestId, assignedRole) => {
         try {
             await fetchWithAuth(`/join-requests/${requestId}/approve`, firebaseUser, { 
@@ -490,12 +524,27 @@ export default function App() {
 
     const handleCreateResource = async (resourceData) => {
         try {
-            await fetchWithAuth('/resources', firebaseUser, {
+            const token = await firebaseUser.getIdToken();
+            const impUid = localStorage.getItem('nexusguard_impersonate_uid');
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+            if (impUid) headers['x-impersonate-uid'] = impUid;
+            const res = await fetch(`${API_BASE}/resources`, {
                 method: 'POST',
+                headers,
                 body: JSON.stringify({ ...resourceData, orgId: currentOrg.id })
             });
-            showToast('Resource provisioned', 'success');
-            fetchResources(currentOrg.id);
+            const data = await res.json();
+            if (res.status === 202 || data.staged) {
+                showToast('Provision staged — awaiting admin approval.', 'info');
+                fetchPendingProvisions(currentOrg.id);
+                setActiveTab('approvals');
+                setApprovalSubTab('staging');
+            } else if (!res.ok) {
+                throw new Error(data.error || 'Failed to create resource');
+            } else {
+                showToast('Resource provisioned successfully!', 'success');
+                fetchResources(currentOrg.id);
+            }
         } catch (err) {
             showToast(err.message, 'error');
         }
@@ -2670,7 +2719,7 @@ export default function App() {
                         </button>
 
                         {['Admin', 'Owner'].includes(currentOrg?.role) && (
-                            <button onClick={() => { setActiveTab('approvals'); fetchPendingRequests(currentOrg?.id); }}
+                            <button onClick={() => { setActiveTab('approvals'); setApprovalSubTab('requests'); fetchPendingRequests(currentOrg?.id); fetchPendingProvisions(currentOrg?.id); }}
                                 className={`w-full flex items-center gap-4 px-4 py-3 rounded-lg transition-all group relative ${
                                     activeTab === 'approvals' 
                                     ? 'bg-brand/10 text-brand border border-brand/20 shadow-sm' 
@@ -2678,8 +2727,8 @@ export default function App() {
                                 }`}>
                                 <UserPlus size={20} className={activeTab === 'approvals' ? 'text-brand' : 'text-text-muted group-hover:text-text-primary'} />
                                 <span className="text-sm font-semibold">Approvals</span>
-                                {pendingRequests.length > 0 && (
-                                    <span className="ml-auto bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-lg shadow-red-500/30">{pendingRequests.length}</span>
+                                {(pendingRequests.length + pendingProvisions.length) > 0 && (
+                                    <span className="ml-auto bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full shadow-lg shadow-red-500/30">{pendingRequests.length + pendingProvisions.length}</span>
                                 )}
                             </button>
                         )}
@@ -2795,69 +2844,148 @@ export default function App() {
                         )}
                         {activeTab === 'approvals' && (
                             <div className="space-y-4">
-                                <div className="flex items-center gap-3 mb-6">
+                                {/* Approvals Header */}
+                                <div className="flex items-center gap-3 mb-2">
                                     <UserPlus className="text-brand" size={24} />
-                                    <h3 className="text-xl font-bold text-text-primary">Join Request Approvals</h3>
+                                    <h3 className="text-xl font-bold text-text-primary">Approvals</h3>
                                 </div>
-                                {pendingRequests.length > 0 ? (
+
+                                {/* Sub-Tab Navigation */}
+                                <div className="flex gap-1 bg-bg-dark border border-border-strong rounded-xl p-1 mb-6 w-fit">
+                                    <button
+                                        onClick={() => setApprovalSubTab('requests')}
+                                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${approvalSubTab === 'requests' ? 'bg-brand text-white shadow-md shadow-brand/30' : 'text-text-muted hover:text-text-primary'}`}
+                                    >
+                                        <UserPlus size={14} />
+                                        Organisation Requests
+                                        {pendingRequests.length > 0 && (
+                                            <span className="bg-white/20 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{pendingRequests.length}</span>
+                                        )}
+                                    </button>
+                                    <button
+                                        onClick={() => { setApprovalSubTab('staging'); fetchPendingProvisions(currentOrg?.id); }}
+                                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${approvalSubTab === 'staging' ? 'bg-accent text-white shadow-md shadow-accent/30' : 'text-text-muted hover:text-text-primary'}`}
+                                    >
+                                        <Database size={14} />
+                                        Staging Area
+                                        {pendingProvisions.length > 0 && (
+                                            <span className="bg-white/20 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">{pendingProvisions.length}</span>
+                                        )}
+                                    </button>
+                                </div>
+
+                                {/* ---- Organisation Requests Sub-Tab ---- */}
+                                {approvalSubTab === 'requests' && (
                                     <div className="space-y-3">
-                                        {pendingRequests.map(req => (
-                                            <div key={req.id} className="flex flex-col gap-3 p-4 bg-bg-surface border border-border-subtle rounded-lg">
-                                                <div className="flex items-center justify-between">
-                                                    <div className="flex items-center gap-4">
-                                                        <div className="w-10 h-10 rounded-full bg-yellow-500/10 border border-yellow-500/30 flex items-center justify-center text-yellow-400 font-bold shrink-0">
-                                                            {(req.displayName || req.email || '?').charAt(0).toUpperCase()}
-                                                        </div>
-                                                        <div>
-                                                            <p className="text-sm font-medium text-text-primary">{req.displayName || 'Unknown User'}</p>
-                                                            <p className="text-xs text-text-muted">{req.email}</p>
-                                                            <div className="flex items-center gap-2 mt-1">
-                                                                <span className="text-[10px] bg-bg-dark text-text-muted px-2 py-0.5 rounded border border-border-strong">
+                                        <p className="text-xs text-text-muted uppercase tracking-widest font-semibold mb-4">Pending Join Requests — approve or deny access to this organisation</p>
+                                        {pendingRequests.length > 0 ? (
+                                            <div className="space-y-3">
+                                                {pendingRequests.map(req => (
+                                                    <div key={req.id} className="flex flex-col gap-3 p-4 bg-bg-surface border border-border-subtle rounded-xl">
+                                                        <div className="flex items-center gap-4">
+                                                            <div className="w-10 h-10 rounded-full bg-yellow-500/10 border border-yellow-500/30 flex items-center justify-center text-yellow-400 font-bold shrink-0">
+                                                                {(req.displayName || req.email || '?').charAt(0).toUpperCase()}
+                                                            </div>
+                                                            <div className="flex-1 min-w-0">
+                                                                <p className="text-sm font-medium text-text-primary">{req.displayName || 'Unknown User'}</p>
+                                                                <p className="text-xs text-text-muted">{req.email}</p>
+                                                                <span className="text-[10px] bg-bg-dark text-text-muted px-2 py-0.5 rounded border border-border-strong mt-1 inline-block">
                                                                     Requested: <span className="text-accent font-medium">{req.requestedRole || 'Viewer'}</span>
                                                                 </span>
                                                             </div>
                                                         </div>
+                                                        <div className="bg-bg-dark rounded p-3 text-sm text-text-secondary border border-border-strong break-words">
+                                                            <span className="text-xs text-text-muted block mb-1 uppercase tracking-wider font-semibold">Work Details / Reason</span>
+                                                            {req.workDetails || 'No details provided.'}
+                                                        </div>
+                                                        <div className="flex items-center justify-end gap-4 mt-1 pt-3 border-t border-border-subtle">
+                                                            <form onSubmit={(e) => { e.preventDefault(); handleApproveRequest(req.id, e.target.assignedRole.value); }} className="flex items-center gap-3">
+                                                                <select name="assignedRole" defaultValue={req.requestedRole || 'Viewer'}
+                                                                    className="bg-bg-dark border border-border-strong rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent">
+                                                                    <option value="Viewer">Viewer</option>
+                                                                    <option value="Developer">Developer</option>
+                                                                    <option value="Manager">Manager</option>
+                                                                </select>
+                                                                <button type="submit" className="flex items-center gap-1.5 bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
+                                                                    <Check size={14} /> Approve
+                                                                </button>
+                                                            </form>
+                                                            <button onClick={() => handleDenyRequest(req.id)}
+                                                                className="flex items-center gap-1.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
+                                                                <X size={14} /> Deny
+                                                            </button>
+                                                        </div>
                                                     </div>
-                                                </div>
-                                                
-                                                <div className="bg-bg-dark rounded p-3 text-sm text-text-secondary border border-border-strong break-words">
-                                                    <span className="text-xs text-text-muted block mb-1 uppercase tracking-wider font-semibold">Work Details / Reason</span>
-                                                    {req.workDetails || 'No details provided.'}
-                                                </div>
-
-                                                <div className="flex items-center justify-end gap-6 mt-2 pt-3 border-t border-border-subtle">
-                                                    <form onSubmit={(e) => {
-                                                        e.preventDefault();
-                                                        handleApproveRequest(req.id, e.target.assignedRole.value);
-                                                    }} className="flex items-center gap-4">
-                                                        <select name="assignedRole" defaultValue={req.requestedRole || 'Viewer'}
-                                                            className="bg-bg-dark border border-border-strong rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent">
-                                                            <option value="Viewer">Viewer</option>
-                                                            <option value="Developer">Developer</option>
-                                                            <option value="Manager">Manager</option>
-                                                        </select>
-                                                        <button type="submit"
-                                                            className="flex items-center gap-1.5 bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
-                                                            <Check size={14} /> Approve
-                                                        </button>
-                                                    </form>
-                                                    <button onClick={() => handleDenyRequest(req.id)}
-                                                        className="flex items-center gap-1.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
-                                                        <X size={14} /> Deny
-                                                    </button>
-                                                </div>
+                                                ))}
                                             </div>
-                                        ))}
+                                        ) : (
+                                            <div className="flex flex-col items-center justify-center p-12 text-center border border-dashed border-border-strong rounded-xl">
+                                                <Check size={48} className="mb-4 text-green-400 opacity-60" />
+                                                <h3 className="text-lg font-medium mb-2 text-text-primary">All Clear</h3>
+                                                <p className="text-sm text-text-muted">No pending join requests for this organisation.</p>
+                                            </div>
+                                        )}
                                     </div>
-                                ) : (
-                                    <div className="flex flex-col items-center justify-center p-12 text-center border border-dashed border-border-strong rounded-lg">
-                                        <Check size={48} className="mb-4 text-green-400 opacity-60" />
-                                        <h3 className="text-lg font-medium mb-2 text-text-primary">All Clear</h3>
-                                        <p className="text-sm text-text-muted">No pending join requests for this organization.</p>
+                                )}
+
+                                {/* ---- Staging Area Sub-Tab ---- */}
+                                {approvalSubTab === 'staging' && (
+                                    <div className="space-y-3">
+                                        <p className="text-xs text-text-muted uppercase tracking-widest font-semibold mb-4">Staged Provisions — approve to publish to the Resource Hub, or deny to remove</p>
+                                        {pendingProvisions.length > 0 ? (
+                                            <div className="space-y-3">
+                                                {pendingProvisions.map(prov => (
+                                                    <div key={prov.id} className="flex flex-col gap-3 p-4 bg-bg-surface border border-border-subtle rounded-xl">
+                                                        <div className="flex items-start gap-4">
+                                                            <div className="w-10 h-10 rounded-lg bg-accent/10 border border-accent/30 flex items-center justify-center text-accent shrink-0">
+                                                                {prov.type === 'Database' ? <Database size={18} /> : prov.type === 'Server' ? <Server size={18} /> : prov.type === 'Globe' ? <Globe size={18} /> : prov.type === 'File' ? <File size={18} /> : <Folder size={18} />}
+                                                            </div>
+                                                            <div className="flex-1 min-w-0">
+                                                                <p className="text-sm font-bold text-text-primary">{prov.name}</p>
+                                                                <div className="flex flex-wrap gap-2 mt-1">
+                                                                    <span className="text-[10px] bg-accent/10 text-accent border border-accent/20 px-2 py-0.5 rounded uppercase font-bold tracking-wide">{prov.type}</span>
+                                                                    <span className="text-[10px] bg-bg-dark text-text-muted border border-border-strong px-2 py-0.5 rounded capitalize">{prov.accessLevel}</span>
+                                                                </div>
+                                                                <div className="mt-2 text-xs text-text-muted flex flex-wrap gap-3">
+                                                                    <span>Submitted by: <span className="text-text-secondary font-medium">{prov.creatorName || prov.creatorEmail || 'Unknown'}</span></span>
+                                                                    {prov.stagedAt && <span>Staged: <span className="text-text-secondary font-medium">{new Date(prov.stagedAt).toLocaleString()}</span></span>}
+                                                                </div>
+                                                                {prov.tags && prov.tags.length > 0 && (
+                                                                    <div className="flex flex-wrap gap-1.5 mt-2">
+                                                                        {prov.tags.map(tag => <span key={tag} className="bg-brand/5 text-brand text-[10px] border border-brand/15 px-1.5 py-0.5 rounded font-medium">#{tag}</span>)}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex items-center justify-end gap-3 pt-3 border-t border-border-subtle">
+                                                            <button
+                                                                onClick={() => handleApproveStagedProvision(prov.id)}
+                                                                className="flex items-center gap-1.5 bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20 px-4 py-1.5 rounded-md text-sm font-medium transition-colors"
+                                                            >
+                                                                <Check size={14} /> Approve & Publish
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleDenyStagedProvision(prov.id)}
+                                                                className="flex items-center gap-1.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 px-4 py-1.5 rounded-md text-sm font-medium transition-colors"
+                                                            >
+                                                                <X size={14} /> Deny
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="flex flex-col items-center justify-center p-12 text-center border border-dashed border-border-strong rounded-xl">
+                                                <Database size={48} className="mb-4 text-accent opacity-40" />
+                                                <h3 className="text-lg font-medium mb-2 text-text-primary">Staging Area is Empty</h3>
+                                                <p className="text-sm text-text-muted">No provisions are waiting for approval. When a Developer creates a resource it will appear here.</p>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                             </div>
                         )}
+
                     </div>
                 </div>
             </main>

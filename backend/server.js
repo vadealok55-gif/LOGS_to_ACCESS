@@ -278,10 +278,21 @@ const hasPrivilege = (privilege) => {
             // Owners and Admins implicitly have all privileges
             if (['Owner', 'Admin'].includes(data.role)) return next();
 
+            // Built-in standard roles have implicit privileges
+            const standardPrivileges = {
+                'Manager': ['READ', 'WRITE', 'DELETE'],
+                'Developer': ['READ', 'WRITE'],
+                'Viewer': ['READ']
+            };
+
+            if (standardPrivileges[data.role] && standardPrivileges[data.role].includes(privilege)) {
+                return next();
+            }
+
             // Check custom group privilege
             if (data.groupId) {
                 const groupDoc = await db.collection('groups').doc(data.groupId).get();
-                if (groupDoc.exists && groupDoc.data().privileges[privilege]) {
+                if (groupDoc.exists && groupDoc.data().privileges?.[privilege]) {
                     return next();
                 }
             }
@@ -509,7 +520,20 @@ app.get('/api/resources/:id/detail', authenticate, async (req, res) => {
 app.post('/api/resources', authenticate, hasPrivilege('WRITE'), async (req, res) => {
     const { name, type, tags, status, traffic, accessLevel, orgId, allowedGroups, allowedRoles } = req.body;
     try {
-        const newResource = {
+        // Determine if the user is an Admin or Owner — they bypass staging
+        let isAdminOrOwner = false;
+        if (req.userData?.isSystemAdmin) {
+            isAdminOrOwner = true;
+        } else if (orgId) {
+            const memberId = `${orgId}_${req.user.uid}`;
+            const memberDoc = await db.collection('org_members').doc(memberId).get();
+            if (memberDoc.exists && ['Owner', 'Admin'].includes(memberDoc.data().role)) {
+                isAdminOrOwner = true;
+            }
+        }
+
+        const creatorName = req.userData?.displayName || req.userData?.email || req.user.email || 'Unknown';
+        const resourceData = {
             name,
             type: type || 'Folder',
             tags: tags || [],
@@ -518,21 +542,34 @@ app.post('/api/resources', authenticate, hasPrivilege('WRITE'), async (req, res)
             accessLevel: accessLevel || 'private',
             orgId: orgId || null,
             creatorUid: req.user.uid,
+            creatorName,
+            creatorEmail: req.user.email || 'unknown',
             allowedGroups: allowedGroups || [],
             allowedRoles: allowedRoles || [],
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
-            logs: [{
+        };
+
+        if (isAdminOrOwner) {
+            // Publish directly to the resource hub
+            resourceData.logs = [{
                 action: 'Created',
                 uid: req.user.uid,
-                userName: req.userData?.displayName || req.userData?.email || req.user.email || 'Unknown',
+                userName: creatorName,
                 email: req.user.email || 'unknown',
                 details: `Resource initialized (${type})`,
                 storage: 'Firestore',
                 timestamp: new Date().toISOString()
-            }]
-        };
-        const docRef = await db.collection('resources').add(newResource);
-        res.status(201).json({ id: docRef.id, ...newResource, source: 'firestore' });
+            }];
+            const docRef = await db.collection('resources').add(resourceData);
+            logActivity(req, 'RESOURCE_CREATED', { resourceName: name, orgId });
+            return res.status(201).json({ id: docRef.id, ...resourceData, source: 'firestore', staged: false });
+        } else {
+            // Route to staging area for approval
+            resourceData.stagedAt = admin.firestore.FieldValue.serverTimestamp();
+            const docRef = await db.collection('pending_provisions').add(resourceData);
+            logActivity(req, 'PROVISION_STAGED', { resourceName: name, orgId });
+            return res.status(202).json({ id: docRef.id, ...resourceData, source: 'staging', staged: true, message: 'Provision sent to staging area for admin approval.' });
+        }
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -656,7 +693,131 @@ app.delete('/api/resources/:id', authenticate, async (req, res) => {
     }
 });
 
-// Get organization audit logs
+// ---- Staging Area / Pending Provisions ----
+
+// Get all pending provisions for an org (Admin/Owner only)
+app.get('/api/pending-provisions', authenticate, async (req, res) => {
+    const { orgId } = req.query;
+    if (!orgId) return res.status(400).json({ error: 'orgId is required' });
+    try {
+        // Verify Admin/Owner
+        let allowed = false;
+        if (req.userData?.isSystemAdmin) {
+            allowed = true;
+        } else {
+            const memberId = `${orgId}_${req.user.uid}`;
+            const memberDoc = await db.collection('org_members').doc(memberId).get();
+            if (memberDoc.exists && ['Admin', 'Owner'].includes(memberDoc.data().role)) {
+                allowed = true;
+            }
+        }
+        if (!allowed) return res.status(403).json({ error: 'Admin or Owner access required.' });
+
+        const snapshot = await db.collection('pending_provisions').where('orgId', '==', orgId).get();
+        const provisions = snapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                id: doc.id,
+                ...data,
+                stagedAt: data.stagedAt?.toDate ? data.stagedAt.toDate().toISOString() : data.stagedAt,
+                createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.createdAt,
+            };
+        }).sort((a, b) => new Date(b.stagedAt) - new Date(a.stagedAt));
+
+        res.json({ provisions });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Approve a pending provision — move it to the resources collection
+app.post('/api/pending-provisions/:id/approve', authenticate, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const docRef = db.collection('pending_provisions').doc(id);
+        const doc = await docRef.get();
+        if (!doc.exists) return res.status(404).json({ error: 'Pending provision not found.' });
+
+        const data = doc.data();
+        const orgId = data.orgId;
+
+        // Verify Admin/Owner
+        let allowed = false;
+        if (req.userData?.isSystemAdmin) {
+            allowed = true;
+        } else if (orgId) {
+            const memberId = `${orgId}_${req.user.uid}`;
+            const memberDoc = await db.collection('org_members').doc(memberId).get();
+            if (memberDoc.exists && ['Admin', 'Owner'].includes(memberDoc.data().role)) {
+                allowed = true;
+            }
+        }
+        if (!allowed) return res.status(403).json({ error: 'Admin or Owner access required.' });
+
+        const approverName = req.userData?.displayName || req.userData?.email || req.user.email || 'Unknown';
+
+        // Move to resources collection
+        const resourceData = {
+            ...data,
+            logs: [{
+                action: 'Created',
+                uid: data.creatorUid,
+                userName: data.creatorName || 'Unknown',
+                email: data.creatorEmail || 'unknown',
+                details: `Provision approved by ${approverName}`,
+                storage: 'Firestore',
+                timestamp: new Date().toISOString()
+            }],
+            approvedBy: req.user.uid,
+            approvedByName: approverName,
+            approvedAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+        // Remove staging-specific fields
+        delete resourceData.stagedAt;
+
+        const newRef = await db.collection('resources').add(resourceData);
+        await docRef.delete();
+        logActivity(req, 'PROVISION_APPROVED', { provisionId: id, resourceName: data.name, orgId });
+        res.json({ message: 'Provision approved and published.', resourceId: newRef.id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Deny / reject a pending provision — remove it from staging
+app.post('/api/pending-provisions/:id/deny', authenticate, async (req, res) => {
+    const { id } = req.params;
+    const { reason } = req.body;
+    try {
+        const docRef = db.collection('pending_provisions').doc(id);
+        const doc = await docRef.get();
+        if (!doc.exists) return res.status(404).json({ error: 'Pending provision not found.' });
+
+        const data = doc.data();
+        const orgId = data.orgId;
+
+        // Verify Admin/Owner
+        let allowed = false;
+        if (req.userData?.isSystemAdmin) {
+            allowed = true;
+        } else if (orgId) {
+            const memberId = `${orgId}_${req.user.uid}`;
+            const memberDoc = await db.collection('org_members').doc(memberId).get();
+            if (memberDoc.exists && ['Admin', 'Owner'].includes(memberDoc.data().role)) {
+                allowed = true;
+            }
+        }
+        if (!allowed) return res.status(403).json({ error: 'Admin or Owner access required.' });
+
+        await docRef.delete();
+        logActivity(req, 'PROVISION_DENIED', { provisionId: id, resourceName: data.name, orgId, reason: reason || 'No reason provided' });
+        res.json({ message: 'Provision denied and removed from staging.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+
 app.get('/api/organizations/:orgId/audit-logs', authenticate, async (req, res) => {
     const { orgId } = req.params;
     try {
