@@ -1,0 +1,70 @@
+=======================================================
+NEXUSGUARD - PROJECT REQUIREMENTS & ACCESS CONTROL MATRIX
+=======================================================
+
+-------------------------
+1. SOFTWARE REQUIREMENTS
+-------------------------
+The application follows a modern MERN stack architecture.
+
+BACKEND (Server API & Security)
+- Runtime: Node.js
+- Framework: Express.js
+- Database: MongoDB (via Mongoose ORM)
+- Authentication: JSON Web Tokens (JWT) & bcrypt for password hashing
+- Security Middleware: Helmet, CORS
+- Environment Config: dotenv
+
+FRONTEND (User Interface)
+- Framework: React.js
+- Build Tool: Vite
+- Routing: React Router DOM
+- Styling: Tailwind CSS
+- Icons: Lucide React
+- External Comms: EmailJS Browser SDK (for outbound verification emails)
+
+-------------------------
+2. HARDWARE REQUIREMENTS
+-------------------------
+CLIENT / END-USER:
+- Any device (PC, Mac, Mobile, Tablet) capable of running a modern, updated web browser (Chrome, Firefox, Safari, Edge).
+- Minimum 2GB RAM.
+
+PRODUCTION SERVER:
+- CPU: 1 vCPU minimum.
+- RAM: 1GB RAM recommended.
+- Storage: 1GB+ (Application is stateless, but the MongoDB database instance will require scaling based on data volume).
+- Network: Reliable broadband for API communications.
+
+DEVELOPMENT ENVIRONMENT:
+- CPU: Multi-core processor (Intel i3/Ryzen 3 equivalent or higher).
+- RAM: Minimum 4GB (8GB+ recommended).
+- Tools: Git, Node.js installed locally.
+
+-------------------------
+3. ACCESS CONTROL MATRIX (ACM)
+-------------------------
+The application uses strict Role-Based Access Control (RBAC) via a multi-layered Access Control Matrix to manage organizational infrastructure and provisions.
+
+A. STANDARD GLOBAL PRIVILEGE MATRIX
+By default, generic privileges are assigned based on a user's standard Organization Role:
+
+| Role             | READ | WRITE | DELETE | EXECUTE | BILLING | NETWORK | INFRASTRUCTURE |
+|------------------|------|-------|--------|---------|---------|---------|----------------|
+| Owner / Admin    | Yes  | Yes   | Yes    | Yes     | Yes     | Yes     | Yes            |
+| Manager          | Yes  | Yes   | Yes    | No      | No      | No      | No             |
+| Developer        | Yes  | Yes   | No     | No      | No      | No      | No             |
+| Viewer           | Yes  | No    | No     | No      | No      | No      | No             |
+
+B. RESOURCE-LEVEL OVERRIDES (GRANULAR ACM)
+When a resource (document/server/folder) is stored in MongoDB, it dynamically checks the ACM to determine access. Explicit rules can override the global privilege matrix:
+
+1. allowedRoles: An array of basic roles (e.g., ['Developer']) allowed to edit the resource.
+2. allowedGroups: An array of Custom Groups allowed to access/edit the resource.
+3. provisionRoles (User-Level Overrides): A user may be explicitly granted "Administration", "Editor", or "Viewer" rights specifically for a single resource, regardless of their standard Organization Role.
+4. provisionGroupRoles (Group-Level Overrides): Same as provisionRoles, applied dynamically to all members of a specific custom group.
+
+C. THE STAGING WORKFLOW ALGORITHM
+- If an "Owner" or "System Admin" creates a resource, it is published immediately.
+- If a "Developer" or "Manager" (who naturally has WRITE privilege) creates a resource, the system intercepts it and places it in a staging approval queue (pending_provisions).
+- An Admin must approve the stage request before it goes live into the primary MongoDB 'resources' collection.

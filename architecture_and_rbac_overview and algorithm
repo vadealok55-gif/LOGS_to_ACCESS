@@ -1,0 +1,54 @@
+# Project Overview: Algorithm and Access Control Matrix (ACM)
+
+This project (NexusGuard) implements a secure, modular platform for managing organizational resources (e.g., servers, databases, files) with a rigorous **Role-Based Access Control (RBAC)** architecture that employs an **Access Control Matrix (ACM)** to determine privileges.
+
+## Overall Architecture Algorithm 
+
+At a high level, the project acts as a secure "Resource Hub" where users can browse, provision, and manage infrastructure or documents. 
+
+1. **Authentication:** Users authenticate via Firebase Auth (Email/Password or Google). The Express backend validates access tokens and associates users with organizations via the `org_members` Firestore collection.
+2. **Impersonation:** System Administrators can "impersonate" users to view exactly what they see without knowing their passwords, passing an `x-impersonate-uid` header.
+3. **The Staging Algorithm (Approval Workflow):** 
+   - When **Owners or Admins** create a new resource, it publishes directly to the active resource hub.
+   - When **Developers or Managers** (who have `WRITE` privileges) create a resource, the backend intercepts this and routes it to an approvals staging area (`pending_provisions`).
+   - Admins or Owners review the staging area and must *Approve* the request for it to be moved to the live `resources` collection or *Deny* it.
+4. **Audit Logging:** Every mutating request (POST, PUT, DELETE) is intercepted by a custom [logger](file:///d:/Alok_projects/MINI_PROJECT_0100/backend/server.js#199-221) middleware that writes an unalterable audit log to the `activity_logs` collection, ensuring complete accountability.
+
+---
+
+## The Access Control Matrix (ACM)
+
+The Access Control Matrix operates at multiple layers to provide both broad organizational access and granular, resource-level security. 
+
+### 1. The Global Privilege Matrix
+Access to generic actions (e.g., creating a resource or navigating to a page) is determined by the **Standard Roles**:
+
+| Role / Privilege | READ | WRITE | DELETE | EXECUTE | BILLING | NETWORK | INFRASTRUCTURE |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Owner / Admin** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Manager** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Developer** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Viewer** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+*(Note: Custom Groups can be created to securely extend these base privileges, for example, giving a group of Developers `EXECUTE` rights without making them Managers.)*
+
+### 2. The Resource-Level Matrix (RBAC inside Resources)
+Once a resource is active in the Hub, the matrix becomes even more granular. A resource document in the database enforces access based on several checks:
+
+- **allowedRoles**: A list of standard roles allowed to see/edit it.
+- **allowedGroups**: Custom groups allowed to see/edit it.
+- **provisionRoles (Overrides)**: If a specific user needs access regardless of their standard role, they can be explicitly granted `Administration`, `Editor`, or `Viewer` access directly on the resource.
+- **provisionGroupRoles (Overrides)**: Same as above, but applied to a specific custom group.
+
+### 3. Execution Pipeline for Resource Editing ([server.js](file:///d:/Alok_projects/MINI_PROJECT_0100/backend/server.js))
+When a user attempts to update a resource, the algorithm processes the ACM in this exact order:
+1. Is the user a **System Admin**? -> `GRANT`
+2. Is the user the **Owner or Admin** of the Organization? -> `GRANT`
+3. Does the user's **Group** have a custom `WRITE` privilege? 
+     - If yes, does the Resource have `allowedGroups`? 
+     - If yes, is the user's group in `allowedGroups`? -> `GRANT`
+4. Is the user explicitly listed in **`provisionRoles`** as `Editor` or `Administration`? -> `GRANT`
+5. If none of the above match -> `DENY (403)`
+
+## Conclusion
+The application heavily utilizes the ACM to ensure that **least privilege** is strictly enforced. It combines sweeping implicit permissions for Admins with extremely granular, user-level overrides (`provisionRoles`) to allow maximum flexibility without compromising security. The entire flow is guarded by an explicit Staging Area to prevent unauthorized users from deploying resources unreviewed.
