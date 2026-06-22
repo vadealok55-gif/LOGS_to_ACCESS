@@ -1,8 +1,6 @@
-# NexusGuard - Resource Hub & Provisioning Platform
+# LOGS_TO_ACCESS - Resource Hub & Provisioning Platform
 
-![NexusGuard Logo](https://via.placeholder.com/1200x300?text=NexusGuard+Platform)
-
-**NexusGuard** is a secure, modular platform designed for managing organizational resources (e.g., servers, databases, files, infrastructure provisions) with a rigorous **Role-Based Access Control (RBAC)** architecture that employs an advanced **Access Control Matrix (ACM)** to determine precise privileges.
+**LOGS_TO_ACCESS** is a secure, modular platform designed for managing organizational resources (e.g., servers, databases, files, infrastructure provisions) with a rigorous **Role-Based Access Control (RBAC)** architecture that employs an advanced **Access Control Matrix (ACM)** to determine precise privileges.
 
 At its core, NexusGuard acts as a secure "Resource Hub" where users can browse, provision, and manage infrastructure or documents. It is built to ensure that least privilege is strictly enforced while maintaining a smooth and dynamic user experience.
 
@@ -244,9 +242,9 @@ VITE_FIREBASE_APP_ID=your_app_id
 
 ---
 
-## 🔥 Firebase Setup
+## 🔥 DATABASE Setup
 
-1. Go to the [Firebase Console](https://console.firebase.google.com/).
+1. Go to the [MANGODB](https://www.mongodb.com/).
 2. Create a new project.
 3. Enable **Authentication** (Email/Password & Google Sign-In).
 4. Enable **Firestore Database**.
