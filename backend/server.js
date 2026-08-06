@@ -64,8 +64,9 @@ const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || './serv
 
 try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-        // Option 1: Parse from environment variable string (Best for Render/Heroku)
-        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+        // Option 1: Parse from Base64 environment variable string (Best for Render/Heroku)
+        const decodedJson = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_JSON, 'base64').toString('utf8');
+        const serviceAccount = JSON.parse(decodedJson);
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount),
             projectId: process.env.FIREBASE_PROJECT_ID || 'nexusguard-hub'
