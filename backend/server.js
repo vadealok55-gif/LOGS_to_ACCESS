@@ -63,15 +63,24 @@ const sendEmailJS = (toEmail, code) => {
 const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || './serviceAccountKey.json';
 
 try {
-    if (fs.existsSync(serviceAccountPath)) {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+        // Option 1: Parse from environment variable string (Best for Render/Heroku)
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount),
+            projectId: process.env.FIREBASE_PROJECT_ID || 'nexusguard-hub'
+        });
+        console.log('✅ Firebase Admin initialized with service account from Environment Variable.');
+    } else if (fs.existsSync(serviceAccountPath)) {
+        // Option 2: Read from local file (Best for local dev)
         admin.initializeApp({
             credential: admin.credential.cert(require(path.resolve(serviceAccountPath))),
             projectId: process.env.FIREBASE_PROJECT_ID || 'nexusguard-hub'
         });
-        console.log('✅ Firebase Admin initialized with service account.');
+        console.log('✅ Firebase Admin initialized with service account file.');
     } else {
-        console.warn('⚠️  serviceAccountKey.json not found. Backend will run in LIMITED MODE (RBAC & Firestore will fail).');
-        console.warn('👉 Place your Firebase Service Account JSON at: ' + path.resolve(serviceAccountPath));
+        console.warn('⚠️  serviceAccountKey.json not found and FIREBASE_SERVICE_ACCOUNT_JSON not set. Backend will run in LIMITED MODE (RBAC & Firestore will fail).');
+        console.warn('👉 Provide credentials via environment variables for production deployments.');
         admin.initializeApp({
             projectId: process.env.FIREBASE_PROJECT_ID || 'nexusguard-hub'
         });
