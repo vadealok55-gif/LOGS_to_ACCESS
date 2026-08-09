@@ -386,7 +386,7 @@ export default function App() {
                 body: JSON.stringify({ name: orgName, ownerUid: firebaseUser.uid })
             });
 
-            const newOrg = { id: data.id, name: data.name, role: 'Admin' };
+            const newOrg = { id: data.id, name: data.name, role: 'Owner' };
             setUserOrgs([...userOrgs, newOrg]);
             handleSelectOrg(newOrg);
             showToast(`Organization "${orgName}" created`, 'success');
