@@ -15,6 +15,7 @@
     "indexes": "firestore.indexes.json"
   },
   "hosting": {
+    "site": "logsaccess",
     "public": "frontend/dist",
     "ignore": [
       "firebase.json",
