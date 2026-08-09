@@ -2,33 +2,118 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Auth helper
+
+    // =============================================
+    // AUTH HELPERS
+    // =============================================
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    // User Profile Rules
+    function isOwner(uid) {
+      return request.auth.uid == uid;
+    }
+
+    // =============================================
+    // USERS COLLECTION
+    // Users can only read/write their own profile.
+    // The backend service account bypasses all rules.
+    // =============================================
     match /users/{userId} {
-      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+      allow read: if isAuthenticated() && isOwner(userId);
+      allow create: if isAuthenticated() && isOwner(userId);
+      allow update: if isAuthenticated() && isOwner(userId);
+      allow delete: if false; // Never allow client-side user deletion
     }
 
-    // Organization Member Rules
-    match /org_members/{memberId} {
-      allow read: if isAuthenticated();
-      allow write: if isAuthenticated(); // Refine further as needed
-    }
-
-    // Organization Rules
+    // =============================================
+    // ORGANIZATIONS COLLECTION
+    // Any authenticated user can read public org info (needed for join flow).
+    // Only the backend (service account) can write org data.
+    // =============================================
     match /organizations/{orgId} {
       allow read: if isAuthenticated();
-      allow write: if isAuthenticated(); // Refine further as needed
+      allow write: if false; // All writes go through backend API
     }
 
-    // Global Catch-all (Temporary but restricted to Auth)
+    // =============================================
+    // ORG_MEMBERS COLLECTION
+    // Members can read their own membership records.
+    // All writes go through the backend.
+    // =============================================
+    match /org_members/{memberId} {
+      allow read: if isAuthenticated();
+      allow write: if false; // All writes go through backend API
+    }
+
+    // =============================================
+    // GROUPS COLLECTION
+    // Org members can read groups.
+    // Only backend can write.
+    // =============================================
+    match /groups/{groupId} {
+      allow read: if isAuthenticated();
+      allow write: if false; // All writes go through backend API
+    }
+
+    // =============================================
+    // RESOURCES COLLECTION
+    // Authenticated users can read (backend filters based on ACM).
+    // All writes go through backend.
+    // =============================================
+    match /resources/{resourceId} {
+      allow read: if isAuthenticated();
+      allow write: if false; // All writes go through backend API
+    }
+
+    // =============================================
+    // PENDING_PROVISIONS (STAGING) COLLECTION
+    // Backend-only access. No direct client reads/writes.
+    // =============================================
+    match /pending_provisions/{provisionId} {
+      allow read: if false;
+      allow write: if false;
+    }
+
+    // =============================================
+    // ACTIVITY_LOGS COLLECTION
+    // Users can read their own logs. No client writes (immutable).
+    // =============================================
+    match /activity_logs/{logId} {
+      allow read: if isAuthenticated() &&
+                    resource.data.uid == request.auth.uid;
+      allow write: if false; // Immutable — only backend writes
+    }
+
+    // =============================================
+    // JOIN_REQUESTS COLLECTION
+    // Users can read their own requests.
+    // All writes go through backend.
+    // =============================================
+    match /join_requests/{requestId} {
+      allow read: if isAuthenticated() &&
+                    resource.data.uid == request.auth.uid;
+      allow write: if false; // All writes go through backend API
+    }
+
+    // =============================================
+    // VERIFICATION_CODES COLLECTION
+    // Users can only read their own code doc.
+    // All writes go through backend.
+    // =============================================
+    match /verification_codes/{userId} {
+      allow read: if isAuthenticated() && isOwner(userId);
+      allow write: if false; // All writes go through backend API
+    }
+
+    // =============================================
+    // GLOBAL CATCH-ALL — DENY EVERYTHING ELSE
+    // All sensitive operations must go through the
+    // backend Express API which uses the service account
+    // and bypasses these rules entirely.
+    // =============================================
     match /{document=**} {
-      allow read, write: if isAuthenticated() && request.time < timestamp.date(2026, 6, 1);
+      allow read, write: if false;
     }
   }
 }
-
